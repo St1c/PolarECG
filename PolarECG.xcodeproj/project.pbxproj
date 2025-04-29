@@ -6,6 +6,11 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		51570E902DC0E84C00E29F95 /* ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51570E8F2DC0E84C00E29F95 /* ActivityView.swift */; };
+		518E03212DC0AFDD00725998 /* PolarBleSdk in Frameworks */ = {isa = PBXBuildFile; productRef = 518E03202DC0AFDD00725998 /* PolarBleSdk */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		518E03032DC0ACED00725998 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -24,14 +29,28 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		51570E8F2DC0E84C00E29F95 /* ActivityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityView.swift; sourceTree = "<group>"; };
 		518E02F52DC0ACEC00725998 /* PolarECG.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PolarECG.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		518E03022DC0ACED00725998 /* PolarECGTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PolarECGTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		518E030C2DC0ACED00725998 /* PolarECGUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PolarECGUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		518E03232DC0B24600725998 /* Exceptions for "PolarECG" folder in "PolarECG" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 518E02F42DC0ACEC00725998 /* PolarECG */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		518E02F72DC0ACEC00725998 /* PolarECG */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				518E03232DC0B24600725998 /* Exceptions for "PolarECG" folder in "PolarECG" target */,
+			);
 			path = PolarECG;
 			sourceTree = "<group>";
 		};
@@ -52,6 +71,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				518E03212DC0AFDD00725998 /* PolarBleSdk in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -75,6 +95,7 @@
 		518E02EC2DC0ACEC00725998 = {
 			isa = PBXGroup;
 			children = (
+				51570E8F2DC0E84C00E29F95 /* ActivityView.swift */,
 				518E02F72DC0ACEC00725998 /* PolarECG */,
 				518E03052DC0ACED00725998 /* PolarECGTests */,
 				518E030F2DC0ACED00725998 /* PolarECGUITests */,
@@ -112,6 +133,7 @@
 			);
 			name = PolarECG;
 			packageProductDependencies = (
+				518E03202DC0AFDD00725998 /* PolarBleSdk */,
 			);
 			productName = PolarECG;
 			productReference = 518E02F52DC0ACEC00725998 /* PolarECG.app */;
@@ -195,6 +217,9 @@
 			);
 			mainGroup = 518E02EC2DC0ACEC00725998;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				518E031F2DC0AFDD00725998 /* XCRemoteSwiftPackageReference "polar-ble-sdk" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 518E02F62DC0ACEC00725998 /* Products */;
 			projectDirPath = "";
@@ -236,6 +261,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				51570E902DC0E84C00E29F95 /* ActivityView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -393,15 +419,22 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = W88RD98X5M;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = PolarECG/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Polar ECG";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.healthcare-fitness";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "App requires Bluetooth to connect to Polar H10 sensor";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.6;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -409,6 +442,7 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = dataworkers.PolarECG;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -420,15 +454,22 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = W88RD98X5M;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = PolarECG/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Polar ECG";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.healthcare-fitness";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "App requires Bluetooth to connect to Polar H10 sensor";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 16.6;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -436,6 +477,7 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = dataworkers.PolarECG;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -550,6 +592,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		518E031F2DC0AFDD00725998 /* XCRemoteSwiftPackageReference "polar-ble-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/polarofficial/polar-ble-sdk";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 6.1.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		518E03202DC0AFDD00725998 /* PolarBleSdk */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 518E031F2DC0AFDD00725998 /* XCRemoteSwiftPackageReference "polar-ble-sdk" */;
+			productName = PolarBleSdk;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 518E02ED2DC0ACEC00725998 /* Project object */;
 }

@@ -34,9 +34,15 @@ class BluetoothManager: NSObject, ObservableObject {
     @Published var robustHRVProgress: Double = 0.0 // 0.0 ... 1.0
     @Published var robustHRVResult: RobustHRVResult? = nil
 
-    private let robustWindow: Double = 300.0 // 5 minutes
+    // Changed from 300.0 (5 minutes) to 120.0 (2 minutes) for quicker robust analysis
+    private let robustWindow: Double = 120.0 // 2 minutes
     private var robustBufferSize: Int { Int(samplingRate * robustWindow) }
     private var robustHRVCalculationTask: Task<Void, Never>? = nil
+    
+    // Add a timestamp to track when measurements started
+    private var measurementStartTime = Date()
+    // Define stabilization period (3 seconds) to ignore at the beginning
+    private let stabilizationPeriod: Double = 5.0
 
     override init() {
         super.init()
@@ -79,8 +85,10 @@ class BluetoothManager: NSObject, ObservableObject {
             if progress < 1.0 {
                 self.robustHRVReady = false
             }
-            // --- DEBUG: Print progress for troubleshooting ---
-            print("Robust HRV progress: \(progress) (\(self.ecgData.count)/\(self.robustBufferSize))")
+            // Reduce debug output frequency
+            if Int(progress * 100) % 5 == 0 || progress >= 1.0 {
+                print("Robust HRV progress: \(progress) (\(self.ecgData.count)/\(self.robustBufferSize))")
+            }
         }
         // Ensure timer runs on main run loop
         RunLoop.main.add(robustProgressTimer!, forMode: .common)
@@ -144,16 +152,30 @@ class BluetoothManager: NSObject, ObservableObject {
         // Step 3: smooth the signal
         let smoothed = movingAverage(clamped, windowSize: 3)
 
-        ecgData.append(contentsOf: smoothed)
+        // Use DispatchQueue.main.async to ensure UI updates happen on main thread
+        // This helps provide smoother rendering
+        DispatchQueue.main.async {
+            // Record start time for the first batch of data
+            if self.ecgData.isEmpty {
+                self.measurementStartTime = Date()
+            }
+            
+            self.ecgData.append(contentsOf: smoothed)
 
-        // Keep rolling buffer of 2×HRV window
-        let maxCount = bufferSize * 2
-        if ecgData.count > maxCount {
-            ecgData.removeFirst(ecgData.count - maxCount)
+            // Keep rolling buffer that's large enough for robust HRV calculation
+            // Use the larger of the two buffer sizes needed (robustBufferSize for 5min calculation)
+            let maxCount = max(self.bufferSize * 2, self.robustBufferSize)
+            if self.ecgData.count > maxCount {
+                self.ecgData.removeFirst(self.ecgData.count - maxCount)
+            }
+            
+            // Reduce debug output frequency to avoid console spam
+            if self.ecgData.count % 100 == 0 || self.ecgData.count >= self.robustBufferSize {
+                print("ECG buffer count: \(self.ecgData.count), robustBufferSize: \(self.robustBufferSize), progress: \(Double(self.ecgData.count) / Double(self.robustBufferSize))")
+            }
+            
+            NotificationCenter.default.post(name: .didAppendECGSamples, object: nil)
         }
-        // --- DEBUG: Print buffer size for troubleshooting robust HRV progress ---
-        print("ECG buffer count: \(ecgData.count), robustBufferSize: \(robustBufferSize), progress: \(Double(ecgData.count) / Double(robustBufferSize))")
-        NotificationCenter.default.post(name: .didAppendECGSamples, object: nil)
     }
 
     private func movingAverage(_ input: [Double], windowSize: Int) -> [Double] {
@@ -218,12 +240,23 @@ class BluetoothManager: NSObject, ObservableObject {
     private func computeHRVPerSecondSlidingWindow() -> [[String: Any]] {
         let window = Int(samplingRate * hrvWindow)
         guard window > 0, ecgData.count >= window else { return [] }
+        
+        // Calculate number of samples to stabilize (3s worth of data)
+        let stabilizationSamples = Int(samplingRate * stabilizationPeriod)
+        
         let totalSeconds = Int(Double(ecgData.count - window) / samplingRate)
         var result: [[String: Any]] = []
         let startTime = Date().addingTimeInterval(-Double(ecgData.count) / samplingRate)
+        
         for sec in 0..<totalSeconds {
             let endIdx = window + sec * Int(samplingRate)
             let startIdx = endIdx - window
+            
+            // Skip HRV calculation for the first 3 seconds of data
+            if startIdx < stabilizationSamples {
+                continue
+            }
+            
             let windowData = Array(ecgData[startIdx..<endIdx])
             let rr = PeakDetector().detectRRIntervals(from: windowData)
             let rmssd = HRVCalculator.computeRMSSD(from: rr)
@@ -265,9 +298,20 @@ class BluetoothManager: NSObject, ObservableObject {
         return result
     }
     
-    /// RR intervals (s) over the last 20s window
+    /// RR intervals (s) over the last 20s window, excluding first 3 seconds
     var rrIntervals: [Double] {
         let windowData = Array(ecgData.suffix(bufferSize))
+        
+        // Calculate how many samples to skip (3 seconds) if we're in the first few seconds of recording
+        let secondsSinceStart = Date().timeIntervalSince(measurementStartTime)
+        if secondsSinceStart < stabilizationPeriod + hrvWindow {
+            // Still in early phase, need to exclude some data
+            let samplesToSkip = min(Int(samplingRate * stabilizationPeriod), windowData.count/2)
+            let stabilizedData = Array(windowData.dropFirst(samplesToSkip))
+            return PeakDetector().detectRRIntervals(from: stabilizedData)
+        }
+        
+        // Normal case - enough data has been collected
         return PeakDetector().detectRRIntervals(from: windowData)
     }
 
@@ -329,8 +373,20 @@ class BluetoothManager: NSObject, ObservableObject {
                     try? await Task.sleep(nanoseconds: 1_000_000_000) // 1s
                     continue
                 }
-                // Compute robust HRV metrics
-                let windowData = Array(self.ecgData.suffix(self.robustBufferSize))
+                
+                // Calculate samples to exclude for stabilization period
+                let stabilizationSamples = Int(self.samplingRate * self.stabilizationPeriod)
+                
+                // Compute robust HRV metrics, excluding the first 3 seconds of data
+                var windowData = Array(self.ecgData.suffix(self.robustBufferSize))
+                
+                // Check if we need to exclude data from the start
+                let secondsSinceStart = Date().timeIntervalSince(self.measurementStartTime)
+                if secondsSinceStart < self.stabilizationPeriod + self.robustWindow {
+                    let samplesToSkip = min(stabilizationSamples, windowData.count/4)
+                    windowData = Array(windowData.dropFirst(samplesToSkip))
+                }
+                
                 let rr = PeakDetector(adaptive: true).detectRRIntervals(from: windowData)
                 let rmssd = HRVCalculator.computeRMSSD(from: rr)
                 let sdnn = HRVCalculator.computeSDNN(from: rr)

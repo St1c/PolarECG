@@ -12,7 +12,10 @@ struct ECGGraphView: View {
     let data: [Double]
     let samplingRate: Double
     let peakIndices: [Int]?
-
+    
+    // Use State and Timer for smoother animations
+    @State private var displayTime = Date()
+    
     var body: some View {
         GeometryReader { geo in
             Canvas { ctx, size in
@@ -55,5 +58,17 @@ struct ECGGraphView: View {
         }
         .background(Color.black)
         .cornerRadius(8)
+        // Force refresh at high rate to ensure smooth animation
+        .onChange(of: data.count) { _ in
+            // Trigger redraw when data changes
+        }
+        .onAppear {
+            // Set up a timer for smoother updates
+            Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { _ in
+                displayTime = Date() // This forces the view to refresh ~30 times per second
+            }
+        }
+        // Use the display time to force refresh
+        .id(displayTime)
     }
 }

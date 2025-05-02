@@ -35,6 +35,11 @@ struct PeakDetector {
         // 1. Bandpass filter (5-15 Hz) using sequential HPF then LPF
         let bandpassed = robustBandpass(ecgData, lowcut: 5.0, highcut: 15.0)
 
+        // --- new: compute absolute gradient & threshold to suppress low‑slope peaks
+        let absGrad = differentiate(bandpassed).map { abs($0) }
+        let medianGrad = median(absGrad)
+        let gradThreshold = thresholdFactor * medianGrad
+
         // 2. Differentiate
         let diff = differentiate(bandpassed)
 
@@ -64,11 +69,17 @@ struct PeakDetector {
                 let searchEnd = min(i + Int(0.12 * samplingRate), mwi.count - 1)
                 let mwiPeakIdx = (i...searchEnd).max(by: { mwi[$0] < mwi[$1] }) ?? i
 
-                // Find R-peak in original ECG within ±60ms of MWI peak
-                let qrsRadius = Int(0.06 * samplingRate)
+                // Find R-peak in original ECG within ±80ms of MWI peak (was ±60ms)
+                let qrsRadius = Int(0.08 * samplingRate) // was 0.06
                 let origStart = max(0, mwiPeakIdx - qrsRadius)
                 let origEnd = min(ecgData.count - 1, mwiPeakIdx + qrsRadius)
                 let rPeakIdx = (origStart...origEnd).max(by: { ecgData[$0] < ecgData[$1] }) ?? mwiPeakIdx
+
+                // ---- new: enforce minimum slope at candidate
+                if absGrad[rPeakIdx] < gradThreshold {
+                    i += 1
+                    continue
+                }
 
                 // Enforce refractory period and physiological RR
                 if let last = lastPeak {
@@ -173,5 +184,17 @@ struct PeakDetector {
         let mean = arr.reduce(0, +) / Double(arr.count)
         let variance = arr.map { pow($0 - mean, 2) }.reduce(0, +) / Double(arr.count)
         return sqrt(variance)
+    }
+}
+
+extension PeakDetector {
+    /// Returns only those R-peak indices that are at least qrsSafeMargin samples away from the buffer edges.
+    /// Use this for real-time streaming: only display/report peaks that are "safe" (not at buffer edge).
+    func detectSafePeakIndices(from ecgData: [Double]) -> [Int] {
+        let allPeaks = detectPeakIndices(from: ecgData)
+        // QRS window: ±60ms, so margin is 2× that (to avoid edge effects in both directions)
+        let qrsSafeMargin = Int(0.12 * samplingRate)
+        guard ecgData.count > 2 * qrsSafeMargin else { return [] }
+        return allPeaks.filter { $0 >= qrsSafeMargin && $0 < ecgData.count - qrsSafeMargin }
     }
 }

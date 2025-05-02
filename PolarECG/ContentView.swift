@@ -106,6 +106,7 @@ struct ContentView: View {
                             
                             Spacer()
                             
+                            // --- Start/Stop Recording Button Row ---
                             HStack(spacing: 16) {
                                 if !bluetoothManager.isRecording {
                                     Button(action: {
@@ -139,7 +140,11 @@ struct ContentView: View {
                                             .cornerRadius(8)
                                     }
                                 }
-                                
+                            }
+                            .padding(.top, 8)
+
+                            // --- Export Buttons Row ---
+                            HStack(spacing: 16) {
                                 Button(action: {
                                     if let url = bluetoothManager.exportECGDataToFile() {
                                         shareFileURL = url
@@ -150,6 +155,29 @@ struct ContentView: View {
                                     }
                                 }) {
                                     Label("Export & Share ECG", systemImage: "square.and.arrow.up")
+                                        .font(.headline)
+                                        .padding(.vertical, 8)
+                                        .padding(.horizontal, 18)
+                                        .background(canExport ? Color.blue.opacity(0.2) : Color.gray.opacity(0.2))
+                                        .foregroundColor(canExport ? .blue : .gray)
+                                        .cornerRadius(8)
+                                }
+                                .disabled(!canExport)
+                                
+                                Button(action: {
+                                    if let url = ECGGraphExporter.exportECGGraph(
+                                        data: bluetoothManager.ecgData,
+                                        samplingRate: bluetoothManager.samplingRate,
+                                        peakIndices: bluetoothManager.last5sPeakIndices // or all peaks if available
+                                    ) {
+                                        shareFileURL = url
+                                        canExport = true
+                                        isSharing = true
+                                    } else {
+                                        canExport = false
+                                    }
+                                }) {
+                                    Label("Export ECG Graph", systemImage: "photo.on.rectangle")
                                         .font(.headline)
                                         .padding(.vertical, 8)
                                         .padding(.horizontal, 18)

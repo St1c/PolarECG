@@ -66,18 +66,14 @@ struct ContentView: View {
                                     .font(.caption)
                                     .foregroundColor(.gray)
                             } else if let robust = bluetoothManager.robustHRVResult {
-                                VStack(alignment: .leading, spacing: 4) {
+                                VStack(alignment: .leading, spacing: 8) {
                                     Text("Robust HRV (5 min):")
                                         .font(.subheadline)
                                         .foregroundColor(.white)
-                                    HStack {
+                                    VStack(alignment: .leading, spacing: 4) {
                                         Text("RMSSD: \(robust.rmssd, specifier: "%.1f") ms")
                                         Text("SDNN: \(robust.sdnn, specifier: "%.1f") ms")
                                         Text("Mean HR: \(robust.meanHR, specifier: "%.1f") BPM")
-                                    }
-                                    .font(.caption)
-                                    .foregroundColor(.white)
-                                    HStack {
                                         Text("NN50: \(robust.nn50)")
                                         Text("pNN50: \(robust.pnn50, specifier: "%.1f") %")
                                         Text("Beats: \(robust.rrCount + 1)")
@@ -86,9 +82,10 @@ struct ContentView: View {
                                     .foregroundColor(.white)
                                 }
                                 .padding(.horizontal)
-                                .padding(.vertical, 6)
+                                .padding(.vertical, 10)
                                 .background(Color.white.opacity(0.05))
                                 .cornerRadius(8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             }
                             
                             ECGGraphView(
@@ -106,6 +103,8 @@ struct ContentView: View {
                                 RoundedRectangle(cornerRadius: 12)
                                     .stroke(Color.white.opacity(0.08), lineWidth: 1)
                             )
+                            
+                            Spacer()
                             
                             HStack(spacing: 16) {
                                 if !bluetoothManager.isRecording {
@@ -169,7 +168,11 @@ struct ContentView: View {
                                 canExport = newURL != nil
                             }
                         }
-                        .padding(.vertical)
+                        .padding(.vertical, 0)
+                        .frame(maxHeight: .infinity, alignment: .top)
+                        .padding(.top, 24)
+                        .padding(.horizontal, 0)
+                        .background(Color.clear)
                     } else {
                         DeviceSelectionView(bluetoothManager: bluetoothManager)
                             .padding(.top, 40)

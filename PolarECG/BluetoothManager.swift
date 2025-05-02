@@ -10,6 +10,7 @@ import Foundation
 import PolarBleSdk
 import RxSwift
 import CoreBluetooth
+import Combine
 
 class BluetoothManager: NSObject, ObservableObject {
     
@@ -23,6 +24,8 @@ class BluetoothManager: NSObject, ObservableObject {
     @Published var isConnected: Bool = false
     @Published var heartRate: Int = 0
     @Published var ecgData: [Double] = []
+    @Published var last5sPeakIndices: [Int] = []
+    @Published var hrv: Double = 0.0
 
     // MARK: - Buffer Settings
     let samplingRate = 130.0
@@ -42,7 +45,23 @@ class BluetoothManager: NSObject, ObservableObject {
     // Add a timestamp to track when measurements started
     private var measurementStartTime = Date()
     // Define stabilization period (3 seconds) to ignore at the beginning
-    private let stabilizationPeriod: Double = 5.0
+    private let stabilizationPeriod: Double = 10.0 // was 5.0, now 10s for more robust HRV
+
+    // Store computed HRV/HR per second for the whole session
+    private var computedPerSecond: [[String: Any]] = []
+
+    // Only keep the last 1 minute of raw ECG data for export and plotting,
+    // but keep a larger rolling buffer for robust HRV calculation.
+    private let rawECGWindow: Double = 60.0 // seconds
+    private var rawECGBufferSize: Int { Int(samplingRate * rawECGWindow) }
+    private let robustECGWindow: Double = 120.0 // seconds (or robustWindow)
+    private var robustECGBufferSize: Int { Int(samplingRate * robustECGWindow) }
+    private var robustECGBuffer: [Double] = []
+
+    // Recording state
+    @Published var isRecording: Bool = false
+    private var sessionFileURL: URL? = nil
+    private var sessionFileHandle: FileHandle? = nil
 
     override init() {
         super.init()
@@ -62,7 +81,17 @@ class BluetoothManager: NSObject, ObservableObject {
             name: .didAppendECGSamples,
             object: nil
         )
+        // Observe ecgData changes to trigger background processing
+        $ecgData
+            .receive(on: DispatchQueue.global(qos: .userInitiated))
+            .sink { [weak self] _ in
+                self?.processECGDataAsync()
+            }
+            .store(in: &cancellables)
     }
+
+    // Store for Combine subscriptions
+    private var cancellables: Set<AnyCancellable> = []
 
     // MARK: - Robust HRV Progress Timer (safe, avoids leaks)
     private var robustProgressTimer: Timer?
@@ -80,17 +109,17 @@ class BluetoothManager: NSObject, ObservableObject {
         robustProgressTimer?.invalidate()
         robustProgressTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            let progress = min(Double(self.ecgData.count) / Double(self.robustBufferSize), 1.0)
+            // Use robustECGBuffer for progress, not ecgData
+            let progress = min(Double(self.robustECGBuffer.count) / Double(self.robustBufferSize), 1.0)
             self.robustHRVProgress = progress
             if progress < 1.0 {
                 self.robustHRVReady = false
             }
             // Reduce debug output frequency
             if Int(progress * 100) % 5 == 0 || progress >= 1.0 {
-                print("Robust HRV progress: \(progress) (\(self.ecgData.count)/\(self.robustBufferSize))")
+                print("Robust HRV progress: \(progress) (\(self.robustECGBuffer.count)/\(self.robustBufferSize))")
             }
         }
-        // Ensure timer runs on main run loop
         RunLoop.main.add(robustProgressTimer!, forMode: .common)
     }
 
@@ -161,14 +190,20 @@ class BluetoothManager: NSObject, ObservableObject {
             }
             
             self.ecgData.append(contentsOf: smoothed)
-
-            // Keep rolling buffer that's large enough for robust HRV calculation
-            // Use the larger of the two buffer sizes needed (robustBufferSize for 5min calculation)
-            let maxCount = max(self.bufferSize * 2, self.robustBufferSize)
-            if self.ecgData.count > maxCount {
-                self.ecgData.removeFirst(self.ecgData.count - maxCount)
+            // Only keep the last 1 minute of raw ECG data for UI/export
+            if self.ecgData.count > self.rawECGBufferSize {
+                self.ecgData.removeFirst(self.ecgData.count - self.rawECGBufferSize)
             }
-            
+
+            // --- Maintain a larger buffer for robust HRV calculation ---
+            self.robustECGBuffer.append(contentsOf: smoothed)
+            if self.robustECGBuffer.count > self.robustECGBufferSize {
+                self.robustECGBuffer.removeFirst(self.robustECGBuffer.count - self.robustECGBufferSize)
+            }
+
+            // --- Compute and store per-second HRV/HR values ---
+            self.updateComputedPerSecondAndStream()
+
             // Reduce debug output frequency to avoid console spam
             if self.ecgData.count % 100 == 0 || self.ecgData.count >= self.robustBufferSize {
                 print("ECG buffer count: \(self.ecgData.count), robustBufferSize: \(self.robustBufferSize), progress: \(Double(self.ecgData.count) / Double(self.robustBufferSize))")
@@ -176,6 +211,74 @@ class BluetoothManager: NSObject, ObservableObject {
             
             NotificationCenter.default.post(name: .didAppendECGSamples, object: nil)
         }
+    }
+
+    // Compute and store per-second HRV/HR values (append only new seconds)
+    private func updateComputedPerSecond() {
+        let window = Int(samplingRate * hrvWindow)
+        guard window > 0, ecgData.count >= window else { return }
+        let stabilizationSamples = Int(samplingRate * stabilizationPeriod)
+        let totalSeconds = Int(Double(ecgData.count - window) / samplingRate)
+        let startTime = Date().addingTimeInterval(-Double(ecgData.count) / samplingRate)
+
+        // Only compute new seconds since last update
+        let alreadyComputed = computedPerSecond.count
+        guard totalSeconds > alreadyComputed else { return }
+        for sec in alreadyComputed..<totalSeconds {
+            let endIdx = window + sec * Int(samplingRate)
+            let startIdx = endIdx - window
+            if startIdx < stabilizationSamples { continue }
+            let windowData = Array(ecgData[startIdx..<endIdx])
+            let rr = PeakDetector().detectRRIntervals(from: windowData)
+            let rmssd = HRVCalculator.computeRMSSD(from: rr)
+            let sdnn = HRVCalculator.computeSDNN(from: rr)
+            let meanHR = HRVCalculator.computeMeanHR(from: rr)
+            let timestamp = ISO8601DateFormatter().string(from: startTime.addingTimeInterval(Double(window + sec * Int(samplingRate)) / samplingRate))
+            computedPerSecond.append([
+                "timestamp": timestamp,
+                "rmssd": rmssd,
+                "sdnn": sdnn,
+                "meanHR": meanHR
+            ])
+        }
+    }
+
+    // Compute and stream per-second HRV/HR values (append only new seconds)
+    private var lastStreamedSecond: Int = 0
+    private func updateComputedPerSecondAndStream() {
+        guard isRecording, let _ = sessionFileHandle else { return }
+        let window = Int(samplingRate * hrvWindow)
+        guard window > 0, ecgData.count >= window else { return }
+        let stabilizationSamples = Int(samplingRate * stabilizationPeriod)
+        let totalSeconds = Int(Double(ecgData.count - window) / samplingRate)
+        let startTime = Date().addingTimeInterval(-Double(ecgData.count) / samplingRate)
+
+        for sec in lastStreamedSecond..<totalSeconds {
+            let endIdx = window + sec * Int(samplingRate)
+            let startIdx = endIdx - window
+            if startIdx < stabilizationSamples { continue }
+            let windowData = Array(ecgData[startIdx..<endIdx])
+            let rr = PeakDetector().detectRRIntervals(from: windowData)
+            let rmssd = HRVCalculator.computeRMSSD(from: rr)
+            let sdnn = HRVCalculator.computeSDNN(from: rr)
+            let meanHR = HRVCalculator.computeMeanHR(from: rr)
+            let timestamp = ISO8601DateFormatter().string(from: startTime.addingTimeInterval(Double(window + sec * Int(samplingRate)) / samplingRate))
+            let dict: [String: Any] = [
+                "timestamp": timestamp,
+                "rmssd": rmssd,
+                "sdnn": sdnn,
+                "meanHR": meanHR
+            ]
+            // Stream as JSON line
+            if let data = try? JSONSerialization.data(withJSONObject: dict, options: []),
+               let fileHandle = self.sessionFileHandle {
+                fileHandle.write(data)
+                if let newline = "\n".data(using: .utf8) {
+                    fileHandle.write(newline)
+                }
+            }
+        }
+        lastStreamedSecond = totalSeconds
     }
 
     private func movingAverage(_ input: [Double], windowSize: Int) -> [Double] {
@@ -193,8 +296,24 @@ class BluetoothManager: NSObject, ObservableObject {
     }
 
     func exportECGDataToFile() -> URL? {
-        // --- HRV per second (using 20s window, logged every second after first 20s) ---
-        let hrvPerSecond: [[String: Any]] = computeHRVPerSecondSlidingWindow()
+        // Only export the last 1 minute of raw ECG data
+        let ecgExport = Array(ecgData.suffix(rawECGBufferSize))
+
+        // Read all computed values from the session file (if available)
+        var hrvPerSecond: [[String: Any]] = []
+        if let sessionFileURL = sessionFileURL,
+           let fileHandle = try? FileHandle(forReadingFrom: sessionFileURL) {
+            fileHandle.seek(toFileOffset: 0)
+            let content = fileHandle.readDataToEndOfFile()
+            if let string = String(data: content, encoding: .utf8) {
+                for line in string.split(separator: "\n") {
+                    if let data = line.data(using: .utf8),
+                       let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        hrvPerSecond.append(obj)
+                    }
+                }
+            }
+        }
 
         // --- Robust HRV summary (if available) ---
         var robustSummary: [String: Any]? = nil
@@ -211,11 +330,14 @@ class BluetoothManager: NSObject, ObservableObject {
             ]
         }
 
+        // Ensure computedPerSecond is up-to-date before export
+        self.updateComputedPerSecond()
+
         let exportData: [String: Any] = [
             "samplingRate": samplingRate,
             "timestamp": ISO8601DateFormatter().string(from: Date()),
-            "ecg": ecgData,
-            "hrvPerSecond": hrvPerSecond,
+            "hrvPerSecond": computedPerSecond, // <-- Make sure this is not empty
+            "ecg": ecgExport,
             "robustHRVSummary": robustSummary as Any
         ]
 
@@ -258,17 +380,18 @@ class BluetoothManager: NSObject, ObservableObject {
             }
             
             let windowData = Array(ecgData[startIdx..<endIdx])
-            let rr = PeakDetector().detectRRIntervals(from: windowData)
-            let rmssd = HRVCalculator.computeRMSSD(from: rr)
-            let sdnn = HRVCalculator.computeSDNN(from: rr)
-            let meanHR = HRVCalculator.computeMeanHR(from: rr)
-            let timestamp = ISO8601DateFormatter().string(from: startTime.addingTimeInterval(Double(window + sec * Int(samplingRate)) / samplingRate))
-            result.append([
-                "timestamp": timestamp,
-                "rmssd": rmssd,
-                "sdnn": sdnn,
-                "meanHR": meanHR
-            ])
+            computeRRIntervalsAsync(ecgData: windowData) { rr in
+                let rmssd = HRVCalculator.computeRMSSD(from: rr)
+                let sdnn = HRVCalculator.computeSDNN(from: rr)
+                let meanHR = HRVCalculator.computeMeanHR(from: rr)
+                let timestamp = ISO8601DateFormatter().string(from: startTime.addingTimeInterval(Double(window + sec * Int(self.samplingRate)) / self.samplingRate))
+                result.append([
+                    "timestamp": timestamp,
+                    "rmssd": rmssd,
+                    "sdnn": sdnn,
+                    "meanHR": meanHR
+                ])
+            }
         }
         return result
     }
@@ -283,17 +406,18 @@ class BluetoothManager: NSObject, ObservableObject {
             let endIdx = min(ecgData.count, (sec + 1) * Int(samplingRate))
             let startIdx = max(0, endIdx - window)
             let windowData = Array(ecgData[startIdx..<endIdx])
-            let rr = PeakDetector().detectRRIntervals(from: windowData)
-            let rmssd = HRVCalculator.computeRMSSD(from: rr)
-            let sdnn = HRVCalculator.computeSDNN(from: rr)
-            let meanHR = HRVCalculator.computeMeanHR(from: rr)
-            let timestamp = ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: Date().timeIntervalSince1970 - Double(totalSeconds - sec)))
-            result.append([
-                "timestamp": timestamp,
-                "rmssd": rmssd,
-                "sdnn": sdnn,
-                "meanHR": meanHR
-            ])
+            computeRRIntervalsAsync(ecgData: windowData) { rr in
+                let rmssd = HRVCalculator.computeRMSSD(from: rr)
+                let sdnn = HRVCalculator.computeSDNN(from: rr)
+                let meanHR = HRVCalculator.computeMeanHR(from: rr)
+                let timestamp = ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: Date().timeIntervalSince1970 - Double(totalSeconds - sec)))
+                result.append([
+                    "timestamp": timestamp,
+                    "rmssd": rmssd,
+                    "sdnn": sdnn,
+                    "meanHR": meanHR
+                ])
+            }
         }
         return result
     }
@@ -330,23 +454,37 @@ class BluetoothManager: NSObject, ObservableObject {
         HRVCalculator.computeMeanHR(from: rrIntervals)
     }
 
-    /// Computes RMSSD (ms) over the last 20 s of ECG
-    var hrv: Double {
-        let windowData = Array(ecgData.suffix(bufferSize))
-        let rr = PeakDetector().detectRRIntervals(from: windowData)
-        return HRVCalculator.computeRMSSD(from: rr)
-    }
-    
     /// Indices of detected peaks in the last 5s window, relative to ecgData
-    var last5sPeakIndices: [Int] {
+    private func processECGDataAsync() {
         let windowCount = Int(samplingRate * 5)
-        guard ecgData.count >= 3 else { return [] }
-        let offset = ecgData.count > windowCount ? ecgData.count - windowCount : 0
-        let windowData = Array(ecgData.suffix(windowCount))
-        let peaks = PeakDetector().detectPeakIndices(from: windowData)
-        return peaks.map { $0 + offset }
+        let bufferSize = self.bufferSize
+        let ecgDataCopy = self.ecgData // avoid thread issues
+
+        // Last 5s peaks
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            guard ecgDataCopy.count >= 3 else {
+                DispatchQueue.main.async { self.last5sPeakIndices = [] }
+                return
+            }
+            let offset = ecgDataCopy.count > windowCount ? ecgDataCopy.count - windowCount : 0
+            let windowData = Array(ecgDataCopy.suffix(windowCount))
+            let peaks = PeakDetector().detectPeakIndices(from: windowData)
+            let indices = peaks.map { $0 + offset }
+            DispatchQueue.main.async { self.last5sPeakIndices = indices }
+        }
+
+        // HRV (RMSSD) over last 20s
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let windowData = Array(ecgDataCopy.suffix(bufferSize))
+            let rr = PeakDetector().detectRRIntervals(from: windowData)
+            // Only update HRV if enough RR intervals are available (at least 10)
+            let rmssd = rr.count >= 10 ? HRVCalculator.computeRMSSD(from: rr) : 0.0
+            DispatchQueue.main.async { self.hrv = rmssd }
+        }
     }
-    
+
     private func startHrStreaming(deviceId: String) {
         api.startHrStreaming(deviceId)
             .subscribe(onNext: { hrData in
@@ -369,24 +507,20 @@ class BluetoothManager: NSObject, ObservableObject {
         robustHRVCalculationTask = Task.detached { [weak self] in
             guard let self = self else { return }
             while true {
-                if self.ecgData.count < self.robustBufferSize {
+                if self.robustECGBuffer.count < self.robustBufferSize {
                     try? await Task.sleep(nanoseconds: 1_000_000_000) // 1s
                     continue
                 }
-                
-                // Calculate samples to exclude for stabilization period
+
                 let stabilizationSamples = Int(self.samplingRate * self.stabilizationPeriod)
-                
-                // Compute robust HRV metrics, excluding the first 3 seconds of data
-                var windowData = Array(self.ecgData.suffix(self.robustBufferSize))
-                
-                // Check if we need to exclude data from the start
+                var windowData = Array(self.robustECGBuffer.suffix(self.robustBufferSize))
+
                 let secondsSinceStart = Date().timeIntervalSince(self.measurementStartTime)
                 if secondsSinceStart < self.stabilizationPeriod + self.robustWindow {
                     let samplesToSkip = min(stabilizationSamples, windowData.count/4)
                     windowData = Array(windowData.dropFirst(samplesToSkip))
                 }
-                
+
                 let rr = PeakDetector(adaptive: true).detectRRIntervals(from: windowData)
                 let rmssd = HRVCalculator.computeRMSSD(from: rr)
                 let sdnn = HRVCalculator.computeSDNN(from: rr)
@@ -406,7 +540,6 @@ class BluetoothManager: NSObject, ObservableObject {
                     self.robustHRVReady = true
                     self.robustHRVProgress = 1.0
                 }
-                // Update every 10s
                 try? await Task.sleep(nanoseconds: 10_000_000_000)
             }
         }
@@ -418,6 +551,39 @@ class BluetoothManager: NSObject, ObservableObject {
         robustHRVReady = false
         robustHRVProgress = 0.0
         robustHRVResult = nil
+    }
+    
+    // Example: Offload RR interval calculation to background
+    func computeRRIntervalsAsync(ecgData: [Double], completion: @escaping ([Double]) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let rr = PeakDetector().detectRRIntervals(from: ecgData)
+            DispatchQueue.main.async {
+                completion(rr)
+            }
+        }
+    }
+
+    // MARK: - Recording Control
+
+    func startRecording() {
+        stopRecording() // Ensure previous session is closed
+
+        // Create (or replace) the session file
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let fileURL = documentsURL.appendingPathComponent("ecg_session_\(Date().timeIntervalSince1970).jsonl")
+        FileManager.default.createFile(atPath: fileURL.path, contents: nil, attributes: nil)
+        sessionFileURL = fileURL
+        sessionFileHandle = try? FileHandle(forWritingTo: fileURL)
+        isRecording = true
+        print("Recording started: \(fileURL.path)")
+    }
+
+    func stopRecording() {
+        isRecording = false
+        sessionFileHandle?.closeFile()
+        sessionFileHandle = nil
+        sessionFileURL = nil
+        print("Recording stopped")
     }
 }
 

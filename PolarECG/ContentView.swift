@@ -6,6 +6,7 @@ struct ContentView: View {
     @State private var isSharing = false
     @State private var shareFileURL: URL?
     @State private var canExport: Bool = false
+    @State private var showAccGraph = false
     
     var body: some View {
         NavigationView {
@@ -57,6 +58,28 @@ struct ContentView: View {
                             }
                             .padding(.horizontal)
                             
+                            // Toggle for acceleration/vertical speed graph
+                            Toggle(isOn: $showAccGraph) {
+                                Text("Show Vertical Speed Graph")
+                                    .foregroundColor(.white)
+                            }
+                            .padding(.horizontal)
+                            .padding(.top, 4)
+
+                            if showAccGraph {
+                                VerticalSpeedGraphView(verticalSpeedData: bluetoothManager.verticalSpeedData)
+                                    .frame(height: 120)
+                                    .padding(.horizontal)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .fill(Color.white.opacity(0.03))
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                                    )
+                            }
+
                             // Robust HRV calculation info
                             if !bluetoothManager.robustHRVReady {
                                 ProgressView(value: bluetoothManager.robustHRVProgress)

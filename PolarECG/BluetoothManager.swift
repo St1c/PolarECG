@@ -27,6 +27,8 @@ class BluetoothManager: NSObject, ObservableObject {
     @Published var ecgData: [Double] = []
     @Published var last5sPeakIndices: [Int] = [] // no longer updated, kept for UI compatibility
     @Published var hrv: Double = 0.0
+    @Published var accelerationData: [(timestamp: Double, x: Double, y: Double, z: Double)] = []
+    @Published var verticalSpeedData: [(timestamp: Double, speed: Double)] = []
 
     // MARK: - Buffer Settings
     let samplingRate = 130.0
@@ -80,6 +82,9 @@ class BluetoothManager: NSObject, ObservableObject {
 
     private let rrBufferWindow: Double = 120.0 // seconds (2 minutes)
     private var rrBufferSize: Int { Int((1000.0 / samplingRate) * rrBufferWindow) } // conservative estimate
+
+    private var accStreamingStarted = false
+    private let accSamplingRate = 50.0 // Polar H10 default for ACC
 
     override init() {
         super.init()
@@ -500,6 +505,59 @@ class BluetoothManager: NSObject, ObservableObject {
             .disposed(by: disposeBag)
     }
 
+    private func startAccStreaming(deviceId: String) {
+        api.requestStreamSettings(deviceId, feature: .acc)
+            .subscribe(onSuccess: { [weak self] settings in
+                self?.api.startAccStreaming(deviceId, settings: settings)
+                    .subscribe(onNext: { accSamples in
+                        // Each accSamples is [PolarAccelerometerData]
+                        // Convert timestamp to Double for compatibility
+                        let accTuples = accSamples.map { sample in
+                            (
+                                timestamp: Double(sample.timeStamp),
+                                x: Double(sample.x) / 1000.0, // convert from mg to g
+                                y: Double(sample.y) / 1000.0,
+                                z: Double(sample.z) / 1000.0
+                            )
+                        }
+                        DispatchQueue.main.async {
+                            self?.appendAccSamples(accTuples)
+                        }
+                    }, onError: { error in
+                        print("ACC streaming error:", error)
+                    })
+                    .disposed(by: self!.disposeBag)
+            }, onFailure: { error in
+                print("Failed to request ACC settings:", error)
+            })
+            .disposed(by: disposeBag)
+    }
+
+    private func appendAccSamples(_ samples: [(timestamp: Double, x: Double, y: Double, z: Double)]) {
+        // Append and keep only last 2 minutes of data
+        accelerationData.append(contentsOf: samples)
+        let maxCount = Int(accSamplingRate * 120.0)
+        if accelerationData.count > maxCount {
+            accelerationData.removeFirst(accelerationData.count - maxCount)
+        }
+        // Compute vertical speed (z-axis derivative)
+        computeVerticalSpeed()
+    }
+
+    private func computeVerticalSpeed() {
+        guard accelerationData.count > 1 else { return }
+        var speeds: [(timestamp: Double, speed: Double)] = []
+        for i in 1..<accelerationData.count {
+            let dt = (accelerationData[i].timestamp - accelerationData[i-1].timestamp) / 1000.0 // ms to s
+            if dt > 0 {
+                let dz = accelerationData[i].z - accelerationData[i-1].z
+                let speed = dz / dt
+                speeds.append((timestamp: accelerationData[i].timestamp, speed: speed))
+            }
+        }
+        verticalSpeedData = speeds
+    }
+
     func startRobustHRVCalculation() {
         robustHRVCalculationTask?.cancel()
         robustHRVReady = false
@@ -582,6 +640,8 @@ class BluetoothManager: NSObject, ObservableObject {
         robustECGBuffer.removeAll()
         rrBuffer.removeAll()
         lastStreamedSecond = 0
+        accelerationData.removeAll()
+        verticalSpeedData.removeAll()
         print("Recording stopped")
     }
 }
@@ -608,6 +668,10 @@ extension BluetoothManager: PolarBleApiObserver, PolarBleApiDeviceInfoObserver, 
             if !ecgStreamingStarted {
                 startEcgStreaming(deviceId: identifier)
                 ecgStreamingStarted = true
+            }
+            if (!accStreamingStarted) {
+                startAccStreaming(deviceId: identifier)
+                accStreamingStarted = true
             }
         }
     }

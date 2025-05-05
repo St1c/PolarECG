@@ -36,22 +36,35 @@ struct ContentView: View {
                             }
                             .padding(.horizontal)
                             
+                            // Replace the HR/HRV display section with both Polar and Local HRV values
                             HStack(spacing: 24) {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("Heart Rate")
+                                    Text("Heart Rate (Polar RR)")
                                         .font(.caption)
                                         .foregroundColor(.gray)
-                                    Text("\(bluetoothManager.heartRate) BPM")
+                                    Text("\(bluetoothManager.meanHeartRate, specifier: "%.1f") BPM")
                                         .font(.title2.bold())
                                         .foregroundColor(.white)
+                                    Text("HRV (RMSSD, Polar RR)")
+                                        .font(.caption2)
+                                        .foregroundColor(.gray)
+                                    Text("\(bluetoothManager.hrvRMSSD, specifier: "%.1f") ms")
+                                        .font(.title3.bold())
+                                        .foregroundColor(.green)
                                 }
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("HRV (RMSSD)")
+                                    Text("Heart Rate (ECG Peaks)")
                                         .font(.caption)
                                         .foregroundColor(.gray)
-                                    Text("\(bluetoothManager.hrv, specifier: "%.1f") ms")
+                                    Text("\(bluetoothManager.meanHeartRateLocal, specifier: "%.1f") BPM")
                                         .font(.title2.bold())
                                         .foregroundColor(.white)
+                                    Text("HRV (RMSSD, ECG Peaks)")
+                                        .font(.caption2)
+                                        .foregroundColor(.gray)
+                                    Text("\(bluetoothManager.hrvRMSSDLocal, specifier: "%.1f") ms")
+                                        .font(.title3.bold())
+                                        .foregroundColor(.orange)
                                 }
                                 Spacer()
                             }
@@ -65,26 +78,53 @@ struct ContentView: View {
                                 Text("Robust HRV calculation in progress (\(Int(bluetoothManager.robustHRVProgress * 100))%)")
                                     .font(.caption)
                                     .foregroundColor(.gray)
-                            } else if let robust = bluetoothManager.robustHRVResult {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text("Robust HRV (5 min):")
-                                        .font(.subheadline)
-                                        .foregroundColor(.white)
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text("RMSSD: \(robust.rmssd, specifier: "%.1f") ms")
-                                        Text("SDNN: \(robust.sdnn, specifier: "%.1f") ms")
-                                        Text("Mean HR: \(robust.meanHR, specifier: "%.1f") BPM")
-                                        Text("NN50: \(robust.nn50)")
-                                        Text("pNN50: \(robust.pnn50, specifier: "%.1f") %")
-                                        Text("Beats: \(robust.rrCount + 1)")
+                            } else {
+                                HStack(alignment: .top, spacing: 24) {
+                                    // --- Polar RR robust HRV ---
+                                    if let robust = bluetoothManager.robustHRVResult {
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            Text("Robust HRV (Polar RR, 2 min):")
+                                                .font(.subheadline)
+                                                .foregroundColor(.green)
+                                            VStack(alignment: .leading, spacing: 4) {
+                                                Text("RMSSD: \(robust.rmssd, specifier: "%.1f") ms")
+                                                Text("SDNN: \(robust.sdnn, specifier: "%.1f") ms")
+                                                Text("Mean HR: \(robust.meanHR, specifier: "%.1f") BPM")
+                                                Text("NN50: \(robust.nn50)")
+                                                Text("pNN50: \(robust.pnn50, specifier: "%.1f") %")
+                                                Text("Beats: \(robust.rrCount + 1)")
+                                            }
+                                            .font(.caption)
+                                            .foregroundColor(.green)
+                                        }
+                                        .padding(.horizontal)
+                                        .padding(.vertical, 10)
+                                        .background(Color.green.opacity(0.08))
+                                        .cornerRadius(8)
                                     }
-                                    .font(.caption)
-                                    .foregroundColor(.white)
+                                    // --- Local robust HRV ---
+                                    if let robustLocal = bluetoothManager.robustHRVResultLocal {
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            Text("Robust HRV (ECG Peaks, 2 min):")
+                                                .font(.subheadline)
+                                                .foregroundColor(.orange)
+                                            VStack(alignment: .leading, spacing: 4) {
+                                                Text("RMSSD: \(robustLocal.rmssd, specifier: "%.1f") ms")
+                                                Text("SDNN: \(robustLocal.sdnn, specifier: "%.1f") ms")
+                                                Text("Mean HR: \(robustLocal.meanHR, specifier: "%.1f") BPM")
+                                                Text("NN50: \(robustLocal.nn50)")
+                                                Text("pNN50: \(robustLocal.pnn50, specifier: "%.1f") %")
+                                                Text("Beats: \(robustLocal.rrCount + 1)")
+                                            }
+                                            .font(.caption)
+                                            .foregroundColor(.orange)
+                                        }
+                                        .padding(.horizontal)
+                                        .padding(.vertical, 10)
+                                        .background(Color.orange.opacity(0.08))
+                                        .cornerRadius(8)
+                                    }
                                 }
-                                .padding(.horizontal)
-                                .padding(.vertical, 10)
-                                .background(Color.white.opacity(0.05))
-                                .cornerRadius(8)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             }
                             

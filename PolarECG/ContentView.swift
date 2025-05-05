@@ -52,20 +52,6 @@ struct ContentView: View {
                                         .font(.title3.bold())
                                         .foregroundColor(.green)
                                 }
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Heart Rate (ECG Peaks)")
-                                        .font(.caption)
-                                        .foregroundColor(.gray)
-                                    Text("\(bluetoothManager.meanHeartRateLocal, specifier: "%.1f") BPM")
-                                        .font(.title2.bold())
-                                        .foregroundColor(.white)
-                                    Text("HRV (RMSSD, ECG Peaks)")
-                                        .font(.caption2)
-                                        .foregroundColor(.gray)
-                                    Text("\(bluetoothManager.hrvRMSSDLocal, specifier: "%.1f") ms")
-                                        .font(.title3.bold())
-                                        .foregroundColor(.orange)
-                                }
                                 Spacer()
                             }
                             .padding(.horizontal)
@@ -100,28 +86,6 @@ struct ContentView: View {
                                         .padding(.horizontal)
                                         .padding(.vertical, 10)
                                         .background(Color.green.opacity(0.08))
-                                        .cornerRadius(8)
-                                    }
-                                    // --- Local robust HRV ---
-                                    if let robustLocal = bluetoothManager.robustHRVResultLocal {
-                                        VStack(alignment: .leading, spacing: 8) {
-                                            Text("Robust HRV (ECG Peaks, 2 min):")
-                                                .font(.subheadline)
-                                                .foregroundColor(.orange)
-                                            VStack(alignment: .leading, spacing: 4) {
-                                                Text("RMSSD: \(robustLocal.rmssd, specifier: "%.1f") ms")
-                                                Text("SDNN: \(robustLocal.sdnn, specifier: "%.1f") ms")
-                                                Text("Mean HR: \(robustLocal.meanHR, specifier: "%.1f") BPM")
-                                                Text("NN50: \(robustLocal.nn50)")
-                                                Text("pNN50: \(robustLocal.pnn50, specifier: "%.1f") %")
-                                                Text("Beats: \(robustLocal.rrCount + 1)")
-                                            }
-                                            .font(.caption)
-                                            .foregroundColor(.orange)
-                                        }
-                                        .padding(.horizontal)
-                                        .padding(.vertical, 10)
-                                        .background(Color.orange.opacity(0.08))
                                         .cornerRadius(8)
                                     }
                                 }

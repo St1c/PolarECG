@@ -42,7 +42,8 @@ struct ContentView: View {
                                     Text("Heart Rate (Polar RR)")
                                         .font(.caption)
                                         .foregroundColor(.gray)
-                                    Text("\(bluetoothManager.meanHeartRate, specifier: "%.1f") BPM")
+                                    // Use the immediate integer heartRate property
+                                    Text("\(bluetoothManager.heartRate) BPM")
                                         .font(.title2.bold())
                                         .foregroundColor(.white)
                                     Text("HRV (RMSSD, Polar RR)")

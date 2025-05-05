@@ -440,14 +440,16 @@ class BluetoothManager: NSObject, ObservableObject {
     /// RR intervals (s) over the last 20s window, using Polar RR buffer if available
     var rrIntervals: [Double] {
         let windowBeats = Int(hrvWindow * 2)
-        if rrBuffer.count >= windowBeats {
-            return Array(rrBuffer.suffix(windowBeats))
+        // Always return up to the last 20 RR intervals, even if fewer are available
+        if rrBuffer.count > 0 {
+            return Array(rrBuffer.suffix(min(windowBeats, rrBuffer.count)))
         }
         return []
     }
 
     /// Computes RMSSD (ms) over the last 20 s using Polar RR intervals
     var hrvRMSSD: Double {
+        // Show HRV even if fewer than 20 samples are available
         HRVCalculator.computeRMSSD(from: rrIntervals)
     }
 
@@ -466,7 +468,8 @@ class BluetoothManager: NSObject, ObservableObject {
         // Only update HRV (RMSSD) over last 20s using polar RR buffer
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            let rmssd = self.rrIntervals.count >= 10 ? HRVCalculator.computeRMSSD(from: self.rrIntervals) : 0.0
+            // Show HRV even if fewer than 20 samples are available
+            let rmssd = self.rrIntervals.count > 1 ? HRVCalculator.computeRMSSD(from: self.rrIntervals) : 0.0
             DispatchQueue.main.async { self.hrv = rmssd }
         }
     }
@@ -475,20 +478,19 @@ class BluetoothManager: NSObject, ObservableObject {
         api.startHrStreaming(deviceId)
             .subscribe(onNext: { [weak self] hrData in
                 guard let self = self else { return }
-                // Only process the first sample per event, and log only once
                 if let sample = hrData.first {
                     DispatchQueue.main.async {
                         self.heartRate = Int(sample.hr)
                         NSLog("HR    BPM: \(sample.hr) rrs: \(sample.rrsMs) rrAvailable: \(sample.rrAvailable) contact status: \(sample.contactStatus) contact supported: \(sample.contactStatusSupported)")
-
-                        // --- Only use RR intervals if rrAvailable is true ---
                         if sample.rrAvailable {
                             let newRRs = sample.rrsMs.map { Double($0) / 1000.0 }
                             self.rrBuffer.append(contentsOf: newRRs)
-                            // Keep only the last robustRRBufferSize RR intervals for robust HRV
                             if self.rrBuffer.count > self.robustRRBufferSize {
                                 self.rrBuffer.removeFirst(self.rrBuffer.count - self.robustRRBufferSize)
                             }
+                            // Update HRV immediately after new RR intervals are appended, even if < 20 samples
+                            let rmssd = self.rrIntervals.count > 1 ? HRVCalculator.computeRMSSD(from: self.rrIntervals) : 0.0
+                            self.hrv = rmssd
                         }
                     }
                 }

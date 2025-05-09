@@ -93,15 +93,20 @@ struct ECGGraphExporter {
         for row in 0..<rows {
             let rowStart = Int(Double(row) * secondsPerRow * samplingRate)
             let rowEnd = min(ecgArray.count, Int(Double(row+1) * secondsPerRow * samplingRate))
-            guard rowEnd > rowStart else { continue }
+            guard rowStart < ecgArray.count else { break } // Stop if no data for this row
+
             let rowData = ecgArray[rowStart..<rowEnd]
             let yOffset = CGFloat(row) * mmHeightPerRow * pixelsPerMm
             let centerY = yOffset + mmHeightPerRow * pixelsPerMm / 2
+
+            if rowData.isEmpty { continue } // Skip empty rows
+
             let points = rowData.enumerated().map { (i, v) -> CGPoint in
-                let x = CGFloat(i) * (mmPerRow * pixelsPerMm) / CGFloat(rowData.count - 1)
+                let x = CGFloat(i) * (mmPerRow * pixelsPerMm) / CGFloat(Int(secondsPerRow * samplingRate) - 1)
                 let y = centerY - CGFloat(v) * amplitudeScale
                 return CGPoint(x: x, y: y)
             }
+
             ctx.beginPath()
             ctx.move(to: points.first!)
             for pt in points.dropFirst() {

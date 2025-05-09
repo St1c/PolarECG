@@ -859,6 +859,8 @@ class BluetoothManager: NSObject, ObservableObject {
         
         // Save a snapshot of current session data
         let ecgSnapshot = Array(ecgData.suffix(rawECGBufferSize))
+        // Ensure computedPerSecond is up-to-date before archiving
+        self.updateComputedPerSecond()
         let hrvSnapshot = Array(computedPerSecond)
         
         // Get robust HRV summary if available

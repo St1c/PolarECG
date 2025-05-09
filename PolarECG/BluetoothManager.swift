@@ -118,13 +118,9 @@ class BluetoothManager: NSObject, ObservableObject {
             name: .didAppendECGSamples,
             object: nil
         )
-        // Observe ecgData changes to trigger background processing
-        $ecgData
-            .receive(on: DispatchQueue.global(qos: .userInitiated))
-            .sink { [weak self] _ in
-                self?.processECGDataAsync()
-            }
-            .store(in: &cancellables)
+        
+        // Use throttled processing for ECG data to reduce CPU load
+        setupECGProcessing()
     }
 
     // Store for Combine subscriptions
@@ -234,7 +230,11 @@ class BluetoothManager: NSObject, ObservableObject {
                 self.measurementStartTime = Date()
             }
             
+            // Reduce UI updates by batching data changes
+            // and only publishing changes when we have enough new data
+            let currentCount = self.ecgData.count
             self.ecgData.append(contentsOf: smoothed)
+            
             // Only keep the last 2 minutes of raw ECG data for UI/export
             if self.ecgData.count > self.rawECGBufferSize {
                 self.ecgData.removeFirst(self.ecgData.count - self.rawECGBufferSize)
@@ -257,8 +257,21 @@ class BluetoothManager: NSObject, ObservableObject {
                 print("ECG buffer count: \(self.ecgData.count), robustBufferSize: \(self.robustBufferSize), progress: \(Double(self.ecgData.count) / Double(self.robustBufferSize))")
             }
             
-            NotificationCenter.default.post(name: .didAppendECGSamples, object: nil)
+            // Throttle UI updates by only notifying observers when we have significant changes
+            // This reduces the number of redraws triggered
+            if self.ecgData.count - currentCount >= Int(self.samplingRate / 10) { // ~10 times per second max
+                NotificationCenter.default.post(name: .didAppendECGSamples, object: nil)
+            }
         }
+    }
+
+    private func setupECGProcessing() {
+        $ecgData
+            .throttle(for: .milliseconds(200), scheduler: DispatchQueue.global(qos: .userInitiated), latest: true)
+            .sink { [weak self] _ in
+                self?.processECGDataAsync()
+            }
+            .store(in: &cancellables)
     }
 
     // Compute and store per-second HRV/HR values (append only new seconds)

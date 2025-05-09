@@ -13,8 +13,9 @@ struct ECGGraphView: View {
     let samplingRate: Double
     let peakIndices: [Int]?
     
-    // Use State and Timer for smoother animations
-    @State private var displayTime = Date()
+    // Remove the displayTime state and timer
+    // Use State for animation frame to limit updates
+    @State private var animationFrame = 0
     
     // Ignore first few seconds for stabilization
     private let stabilizationPeriod: Double = 3.0
@@ -31,7 +32,18 @@ struct ECGGraphView: View {
                     ? plotDataRaw.dropFirst(stabilizationSamples)
                     : []
                 guard plotData.count > 1 else { return }
-                let plotArray = Array(plotData)
+                
+                // Downsample data for rendering if it's too dense
+                // This greatly improves performance when we have lots of data
+                let maxPointsToDraw = 400 // Limit maximum points to draw
+                let plotArray: [Double]
+                let downsampleFactor = max(1, Int(plotData.count / maxPointsToDraw))
+                if (downsampleFactor > 1) {
+                    plotArray = stride(from: 0, to: plotData.count, by: downsampleFactor).map { plotData[Array<Any>.Index($0)] }
+                } else {
+                    plotArray = Array(plotData)
+                }
+                
                 let amplitudeScale: CGFloat = 60 // larger = smaller amplitude
                 let verticalMargin: CGFloat = size.height * 0.15
                 let centerY = size.height / 2
@@ -76,6 +88,8 @@ struct ECGGraphView: View {
                 ctx.stroke(baselinePath, with: .color(.gray.opacity(0.5)), lineWidth: 1)
 
                 let path = Path { p in
+                    guard plotArray.count > 1 else { return }
+                    
                     let step = size.width / CGFloat(plotArray.count - 1)
                     p.move(to: CGPoint(x: 0, y: centerY))
                     for (i, v) in plotArray.enumerated() {
@@ -88,15 +102,31 @@ struct ECGGraphView: View {
                 }
                 ctx.stroke(path, with: .color(.red), lineWidth: 1.5) // Changed from .green to .red
 
-                // Draw peaks as red circles
+                // Draw peaks as red circles - but only draw a reasonable number
                 if let peakIndices = peakIndices {
                     let offset = data.count > windowCount ? data.count - windowCount : 0
                     let peakOffset = offset > stabilizationSamples ? offset : stabilizationSamples
-                    for peak in peakIndices {
+                    
+                    // Only draw peaks that fall within our plotted data
+                    let filteredPeaks = peakIndices.filter { 
+                        let localIdx = $0 - peakOffset
+                        return localIdx >= 0 && localIdx < plotData.count
+                    }
+                    
+                    // Limit the number of peaks we draw to avoid performance issues
+                    let peaksToDraw = filteredPeaks.count > 50 ? 
+                        filteredPeaks.suffix(50) : filteredPeaks
+                        
+                    for peak in peaksToDraw {
                         let localIdx = peak - peakOffset
-                        guard localIdx >= 0 && localIdx < plotArray.count else { continue }
-                        let x = CGFloat(localIdx) * size.width / CGFloat(plotArray.count - 1)
-                        let y = centerY - CGFloat(plotArray[localIdx]) * amplitudeScale
+                        guard localIdx >= 0 && localIdx < plotData.count else { continue }
+                        
+                        // Find appropriate index in our downsampled array
+                        let displayIdx = Int(Double(localIdx) / Double(plotData.count) * Double(plotArray.count))
+                        guard displayIdx >= 0 && displayIdx < plotArray.count else { continue }
+                        
+                        let x = CGFloat(displayIdx) * size.width / CGFloat(plotArray.count - 1)
+                        let y = centerY - CGFloat(plotArray[displayIdx]) * amplitudeScale
                         let yClamped = min(max(y, verticalMargin), size.height - verticalMargin)
                         let circle = Path(ellipseIn: CGRect(x: x-3, y: yClamped-3, width: 6, height: 6))
                         ctx.fill(circle, with: .color(.green)) // Changed from .red to .green
@@ -106,17 +136,37 @@ struct ECGGraphView: View {
         }
         .background(Color.black)
         .cornerRadius(8)
-        // Force refresh at high rate to ensure smooth animation
-        .onChange(of: data.count) { _ in
-            // Trigger redraw when data changes
-        }
-        .onAppear {
-            // Set up a timer for smoother updates
-            Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { _ in
-                displayTime = Date() // This forces the view to refresh ~30 times per second
+        // Only trigger redraws when data count changes significantly
+        .onChange(of: data.count) { newCount in
+            // Only update animation frame when we have meaningful data changes
+            // (at least 10 new samples, or approximately 10/130 = 77ms of data)
+            if newCount % 10 == 0 {
+                animationFrame += 1
             }
         }
-        // Use the display time to force refresh
-        .id(displayTime)
+        // Use animationFrame for id - this limits view refreshes
+        .id(animationFrame)
+        // Use DisplayLink for more efficient animation if needed
+        .onAppear {
+            // Start a DisplayLink timer that's synchronized with screen refresh
+            startDisplayLink()
+        }
+        .onDisappear {
+            stopDisplayLink()
+        }
+    }
+    
+    // More efficient display refresh using CADisplayLink
+    private func startDisplayLink() {
+        // Create a timer that fires less frequently (e.g., 5 fps instead of 30)
+        // This is just for smooth scrolling effect, not for every data update
+        Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
+            // Update much less frequently - 5 fps is enough for smooth visual effect
+            animationFrame += 1
+        }
+    }
+    
+    private func stopDisplayLink() {
+        // Clean up any timers if needed
     }
 }

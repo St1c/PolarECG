@@ -347,20 +347,6 @@ class BluetoothManager: NSObject, ObservableObject {
         }
     }
 
-    private func movingAverage(_ input: [Double], windowSize: Int) -> [Double] {
-        guard windowSize > 1, input.count >= windowSize else { return input }
-        var result: [Double] = []
-        for i in 0..<(input.count - windowSize + 1) {
-            let window = input[i..<(i + windowSize)]
-            result.append(window.reduce(0, +) / Double(windowSize))
-        }
-        // pad to keep length
-        if let last = result.last {
-            result.append(contentsOf: Array(repeating: last, count: input.count - result.count))
-        }
-        return result
-    }
-
     func exportECGDataToFile() -> URL? {
         // Use the archived session data if available, otherwise use current data
         let exportData: [String: Any]
@@ -668,7 +654,7 @@ class BluetoothManager: NSObject, ObservableObject {
         return out
     }
 
-    // VERY simple and direct jump detection with proper bounds checking
+    // Improved jump detection with physics-based approach
     func detectJumps() {
         guard jumpMode else { return }
         // Clear previous results each time
@@ -690,70 +676,176 @@ class BluetoothManager: NSObject, ObservableObject {
             currentZAcceleration = lastSample.z
         }
         
-        let minZ = zValues.min() ?? 0
-        let maxZ = zValues.max() ?? 0
-        let range = maxZ - minZ
-            
-        print("Z range: \(range) (min: \(minZ), max: \(maxZ))")
+        // Step 1: Apply high-pass filter to remove gravity bias (0.5 Hz cutoff)
+        let filteredZ = highPass(zValues, cutoffHz: 0.5, sampleRate: fs)
         
-        // Extremely sensitive threshold - just 0.2g difference required
-        if range > 0.2 {
-            guard let minIdx = zValues.firstIndex(of: minZ),
-                  let maxIdx = zValues.firstIndex(of: maxZ) else { 
-                return 
+        // Step 2: Smooth the signal to reduce noise (3-point moving average)
+        let smoothedZ = movingAverage(filteredZ, windowSize: 3)
+        
+        // Step 3: Compute signal statistics for adaptive thresholds
+        let mean = smoothedZ.reduce(0, +) / Double(smoothedZ.count)
+        let absValues = smoothedZ.map { abs($0 - mean) }
+        let stdDev = sqrt(absValues.map { pow($0, 2) }.reduce(0, +) / Double(absValues.count))
+        
+        // Step 4: Define detection thresholds (more sensitive)
+        let takeoffThreshold = -0.6 // Negative peak for takeoff (pushing down)
+        let landingThreshold = 1.0  // Positive peak for landing
+        let minFlightTime = 0.15    // Minimum flight time in seconds
+        let maxFlightTime = 1.0     // Maximum flight time in seconds
+        
+        // Step 5: Scan for jump phases - takeoff followed by landing
+        var jumpCandidates = [(takeoffIdx: Int, landingIdx: Int, flightTime: Double, heightCm: Double)]()
+        
+        var takeoffCandidates = [Int]()
+        var inFlight = false
+        var takeoffIdx = -1
+        
+        // Find potential takeoff points (significant negative acceleration)
+        for i in 1..<(smoothedZ.count-1) {
+            // Current point and neighbors
+            let prev = smoothedZ[i-1]
+            let curr = smoothedZ[i]
+            let next = smoothedZ[i+1]
+            
+            // Detect takeoff - negative peak (pushing down)
+            if !inFlight && curr < takeoffThreshold && curr < prev && curr < next {
+                takeoffCandidates.append(i)
+                print("Potential takeoff at \(i): \(curr)")
             }
             
-            // Use indices to calculate approximate flight time
-            let takeoffIdx = min(minIdx, maxIdx)
-            let landingIdx = max(minIdx, maxIdx)
-            let flightSeconds = Double(landingIdx - takeoffIdx) / fs
+            // For each takeoff candidate, look for a landing within the valid time window
+            if !inFlight && !takeoffCandidates.isEmpty {
+                takeoffIdx = takeoffCandidates.removeLast() // Use most recent takeoff candidate
+                inFlight = true
+                print("Flight started at index \(takeoffIdx)")
+            }
             
-            // Calculate a reasonable height based on time
-            // Use a more forgiving formula to ensure we get some height
-            let heightCm = 100.0 * 0.4 * 9.81 * pow(flightSeconds/2, 2) 
-            let clampedHeight = min(max(heightCm, 5.0), 50.0)
-            
-            jumpEvents = [(takeoffIdx: takeoffIdx, landingIdx: landingIdx, heightCm: clampedHeight)]
-            jumpHeights = [clampedHeight]
-            print("DETECTED JUMP! Height: \(clampedHeight)cm, Flight time: \(flightSeconds)s")
-        } else {
-            // Look for any peaks in Z acceleration as an alternative method
-            var peaks = [(Int, Double)]()
-            let mean = zValues.reduce(0, +) / Double(zValues.count)
-            // Find local maxima/minima that deviate significantly from the mean
-            for i in 1..<(zValues.count-1) {
-                let prev = zValues[i-1]
-                let curr = zValues[i]
-                let next = zValues[i+1]
-                // Look for both upward and downward peaks
-                if (curr > prev && curr > next && curr > mean + 0.1) ||
-                   (curr < prev && curr < next && curr < mean - 0.1) {
-                    peaks.append((i, curr))
-                    print("Found peak: \(curr)g at index \(i)")
+            // Detect landing after takeoff - positive peak
+            if inFlight && curr > landingThreshold && curr > prev && curr > next {
+                let landingIdx = i
+                let flightTime = Double(landingIdx - takeoffIdx) / fs
+                
+                // Validate flight time
+                if flightTime >= minFlightTime && flightTime <= maxFlightTime {
+                    // Calculate height using physics formula: h = 1/8 × g × t²
+                    // g = 9.81 m/s², t = flight time in seconds
+                    let heightCm = 122.625 * pow(flightTime, 2) // 9.81/8*100*t²
+                    
+                    jumpCandidates.append(
+                        (takeoffIdx: takeoffIdx, 
+                         landingIdx: landingIdx, 
+                         flightTime: flightTime,
+                         heightCm: heightCm)
+                    )
+                    print("Jump detected! Takeoff: \(takeoffIdx), Landing: \(landingIdx), Flight: \(flightTime)s, Height: \(heightCm)cm")
                 }
+                
+                inFlight = false
+                takeoffIdx = -1
             }
             
-            // If we found multiple peaks, use them to estimate jump
-            if peaks.count >= 2 {
-                // Sort by index
-                let sortedPeaks = peaks.sorted { $0.0 < $1.0 }
-                // Take first and last peak
-                let first = sortedPeaks.first!
-                let last = sortedPeaks.last!
-                
-                let takeoffIdx = first.0
-                let landingIdx = last.0
-                let flightSeconds = Double(landingIdx - takeoffIdx) / fs
-                
-                // Conservative height calculation
-                let heightCm = min(max(100.0 * 0.3 * 9.81 * pow(flightSeconds/2, 2), 5.0), 40.0)
-                jumpEvents = [(takeoffIdx: takeoffIdx, landingIdx: landingIdx, heightCm: heightCm)]
-                jumpHeights = [heightCm]
-                print("DETECTED JUMP FROM PEAKS! Height: \(heightCm)cm, Flight time: \(flightSeconds)s")
+            // Reset flight state if too much time passes without landing
+            if inFlight && (i - takeoffIdx) > Int(maxFlightTime * fs) {
+                inFlight = false
+                takeoffIdx = -1
             }
         }
+        
+        // Step 6: Filter candidates to find the most likely jump
+        if !jumpCandidates.isEmpty {
+            // Sort by height (highest jump is most likely a real jump)
+            let sortedJumps = jumpCandidates.sorted { $0.heightCm > $1.heightCm }
+            
+            // Convert to app's expected format
+            jumpEvents = sortedJumps.map { 
+                (takeoffIdx: $0.takeoffIdx, landingIdx: $0.landingIdx, heightCm: $0.heightCm) 
+            }
+            jumpHeights = sortedJumps.map { $0.heightCm }
+            
+            print("Found \(jumpCandidates.count) jumps, best height: \(jumpHeights.first ?? 0) cm")
+        } else {
+            // Fallback detection for subtle jumps
+            fallbackJumpDetection(zValues: zValues, fs: fs)
+        }
+        
         objectWillChange.send()
     }
+    
+    // Fallback detection for more subtle jumps
+    private func fallbackJumpDetection(zValues: [Double], fs: Double) {
+        // Look for rapid changes in acceleration as indicators of takeoff and landing
+        var crossings = [(index: Int, direction: Bool)]() // true = rising, false = falling
+        
+        let mean = zValues.reduce(0, +) / Double(zValues.count)
+        
+        // Find zero crossings (where acceleration crosses the mean)
+        for i in 1..<zValues.count {
+            if (zValues[i-1] < mean && zValues[i] >= mean) {
+                crossings.append((index: i, direction: true)) // rising
+            } else if (zValues[i-1] > mean && zValues[i] <= mean) {
+                crossings.append((index: i, direction: false)) // falling
+            }
+        }
+        
+        // Need at least 2 crossings to detect a jump
+        guard crossings.count >= 2 else { return }
+        
+        // Look for rising followed by falling with appropriate time gap
+        for i in 0..<(crossings.count-1) {
+            let first = crossings[i]
+            let second = crossings[i+1]
+            
+            if first.direction == false && second.direction == true {
+                let timeDiff = Double(second.index - first.index) / fs
+                
+                // Valid jump time range
+                if timeDiff >= 0.15 && timeDiff <= 0.8 {
+                    // More conservative height calculation for subtle jumps
+                    let heightCm = 100.0 * pow(timeDiff, 2)
+                    // Clamp to realistic range
+                    let clampedHeight = min(max(heightCm, 5.0), 40.0)
+                    
+                    jumpEvents = [(takeoffIdx: first.index, landingIdx: second.index, heightCm: clampedHeight)]
+                    jumpHeights = [clampedHeight]
+                    print("SUBTLE JUMP DETECTED! Height: \(clampedHeight)cm, Flight time: \(timeDiff)s")
+                    return
+                }
+            }
+        }
+    }
+    
+    // Helper function for moving average
+    private func movingAverage(_ data: [Double], windowSize: Int) -> [Double] {
+        guard data.count > windowSize, windowSize > 0 else { return data }
+        
+        var result = [Double]()
+        for i in 0...(data.count - windowSize) {
+            let windowSum = data[i..<(i+windowSize)].reduce(0, +)
+            result.append(windowSum / Double(windowSize))
+        }
+        
+        // Pad the end to maintain original length
+        let padding = data.count - result.count
+        if padding > 0 {
+            result.append(contentsOf: Array(repeating: result.last ?? 0, count: padding))
+        }
+        
+        return result
+    }
+
+    // private func movingAverage(_ input: [Double], windowSize: Int) -> [Double] {
+    //     guard windowSize > 1, input.count >= windowSize else { return input }
+    //     var result: [Double] = []
+    //     for i in 0..<(input.count - windowSize + 1) {
+    //         let window = input[i..<(i + windowSize)]
+    //         result.append(window.reduce(0, +) / Double(windowSize))
+    //     }
+    //     // pad to keep length
+    //     if let last = result.last {
+    //         result.append(contentsOf: Array(repeating: last, count: input.count - result.count))
+    //     }
+    //     return result
+    // }
 
     func startRobustHRVCalculation() {
         robustHRVCalculationTask?.cancel()

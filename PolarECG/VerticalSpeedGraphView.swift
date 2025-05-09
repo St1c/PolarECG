@@ -88,13 +88,9 @@ struct VerticalSpeedGraphView: View {
                 }
             }
 
-            // Draw jump events - FIXED to avoid index out of range
+            // Draw jump events with improved visualization
             ForEach(jumpEvents.indices, id: \.self) { idx in
                 let event = jumpEvents[idx]
-                
-                // FIXED: Don't use original indices directly - use relative positions instead
-                // The jump events may have indices from the original full dataset,
-                // but we're showing only a window of that data
                 
                 // Calculate relative positions (0.0-1.0) in the graph
                 let relTakeoff = min(1.0, max(0.0, Double(event.takeoffIdx) / Double(max(1, windowLength))))
@@ -115,15 +111,15 @@ struct VerticalSpeedGraphView: View {
                 let yTake = baselineY - CGFloat(takeValue) * (geo.size.height / 4)
                 let yLand = baselineY - CGFloat(landValue) * (geo.size.height / 4)
                 
-                // Draw flight path curve
+                // Draw flight path curve with improved visibility
                 Path { path in
                     path.move(to: CGPoint(x: xTake, y: yTake))
                     
-                    // Parabolic flight path
+                    // Parabolic flight path that better shows the jump arc
                     let cp1x = xTake + (xLand - xTake) * 0.25
-                    let cp1y = min(yTake, yLand) - 40
+                    let cp1y = min(yTake, yLand) - 50 // Higher arc for better visibility
                     let cp2x = xTake + (xLand - xTake) * 0.75
-                    let cp2y = min(yTake, yLand) - 40
+                    let cp2y = min(yTake, yLand) - 50
                     
                     path.addCurve(
                         to: CGPoint(x: xLand, y: yLand),
@@ -133,36 +129,47 @@ struct VerticalSpeedGraphView: View {
                 }
                 .stroke(Color.yellow, style: StrokeStyle(lineWidth: 2, dash: [4, 2]))
                 
-                // Takeoff marker
+                // Takeoff marker - make more prominent
                 ZStack {
                     Circle()
-                        .fill(Color.yellow)
-                        .frame(width: 12, height: 12)
+                        .fill(Color.orange)
+                        .frame(width: 14, height: 14)
                     Text("T")
-                        .font(.system(size: 8, weight: .bold))
+                        .font(.system(size: 9, weight: .bold))
                         .foregroundColor(.black)
                 }
                 .position(x: xTake, y: yTake)
                 
-                // Landing marker
+                // Landing marker - make more prominent
                 ZStack {
                     Circle()
                         .fill(Color.green)
-                        .frame(width: 12, height: 12)
+                        .frame(width: 14, height: 14)
                     Text("L")
-                        .font(.system(size: 8, weight: .bold))
+                        .font(.system(size: 9, weight: .bold))
                         .foregroundColor(.black)
                 }
                 .position(x: xLand, y: yLand)
                 
-                // Jump height label with better visibility
+                // Jump height label with improved visibility
                 Text("Jump: \(String(format: "%.1f", event.heightCm)) cm")
-                    .font(.caption)
-                    .padding(4)
-                    .background(Color.yellow.opacity(0.7))
+                    .font(.headline)
+                    .padding(5)
+                    .background(Color.yellow)
                     .foregroundColor(.black)
-                    .cornerRadius(4)
-                    .position(x: (xTake + xLand) / 2, y: min(yTake, yLand) - 25)
+                    .cornerRadius(5)
+                    .shadow(color: .black.opacity(0.5), radius: 2)
+                    .position(x: (xTake + xLand) / 2, y: min(yTake, yLand) - 30)
+                
+                // Add flight time information
+                let flightTime = Double(event.landingIdx - event.takeoffIdx) / 50.0 // assuming 50Hz
+                Text("Flight: \(String(format: "%.2f", flightTime))s")
+                    .font(.caption)
+                    .padding(3)
+                    .background(Color.white.opacity(0.7))
+                    .foregroundColor(.black)
+                    .cornerRadius(3)
+                    .position(x: (xTake + xLand) / 2, y: min(yTake, yLand) - 10)
             }
         }
         .background(Color.black.opacity(0.3))

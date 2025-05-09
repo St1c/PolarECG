@@ -160,7 +160,8 @@ struct HRVMeasurementView: View {
                     if let url = ECGGraphExporter.exportECGGraph(
                         data: bluetoothManager.ecgData,
                         samplingRate: bluetoothManager.samplingRate,
-                        peakIndices: bluetoothManager.last5sPeakIndices
+                        peakIndices: bluetoothManager.last5sPeakIndices,
+                        archivedSessionData: bluetoothManager.getArchivedSessionData()
                     ) {
                         shareFileURL = url
                         canExport = true

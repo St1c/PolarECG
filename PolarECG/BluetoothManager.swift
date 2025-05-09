@@ -362,51 +362,42 @@ class BluetoothManager: NSObject, ObservableObject {
     }
 
     func exportECGDataToFile() -> URL? {
-        // Only export the last 2 minutes of raw ECG data for export/plot
-        let ecgExport = Array(ecgData.suffix(rawECGBufferSize))
-
-        // Read all computed values from the session file (if available)
-        var hrvPerSecond: [[String: Any]] = []
-        if let sessionFileURL = sessionFileURL,
-           let fileHandle = try? FileHandle(forReadingFrom: sessionFileURL) {
-            fileHandle.seek(toFileOffset: 0)
-            let content = fileHandle.readDataToEndOfFile()
-            if let string = String(data: content, encoding: .utf8) {
-                for line in string.split(separator: "\n") {
-                    if let data = line.data(using: .utf8),
-                       let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                        hrvPerSecond.append(obj)
-                    }
-                }
+        // Use the archived session data if available, otherwise use current data
+        let exportData: [String: Any]
+        
+        if let archived = archivedSessionData {
+            exportData = archived
+        } else {
+            // No archived data, use current buffers (live data)
+            let ecgExport = Array(ecgData.suffix(rawECGBufferSize))
+            
+            // Ensure computedPerSecond is up-to-date
+            self.updateComputedPerSecond()
+            
+            // Create robust HRV summary if available
+            var robustSummary: [String: Any]? = nil
+            if let robust = robustHRVResult {
+                robustSummary = [
+                    "timestamp": ISO8601DateFormatter().string(from: Date()),
+                    "windowSeconds": Int(robustWindow),
+                    "rmssd": robust.rmssd,
+                    "sdnn": robust.sdnn,
+                    "meanHR": robust.meanHR,
+                    "nn50": robust.nn50,
+                    "pnn50": robust.pnn50,
+                    "beats": robust.rrCount + 1
+                ]
             }
-        }
-
-        // --- Robust HRV summary (if available) ---
-        var robustSummary: [String: Any]? = nil
-        if let robust = robustHRVResult {
-            robustSummary = [
+            
+            exportData = [
+                "samplingRate": samplingRate,
                 "timestamp": ISO8601DateFormatter().string(from: Date()),
-                "windowSeconds": Int(robustWindow),
-                "rmssd": robust.rmssd,
-                "sdnn": robust.sdnn,
-                "meanHR": robust.meanHR,
-                "nn50": robust.nn50,
-                "pnn50": robust.pnn50,
-                "beats": robust.rrCount + 1
+                "ecg": ecgExport,
+                "hrvPerSecond": computedPerSecond,
+                "robustHRVSummary": robustSummary as Any
             ]
         }
-
-        // Ensure computedPerSecond is up-to-date before export
-        self.updateComputedPerSecond()
-
-        let exportData: [String: Any] = [
-            "samplingRate": samplingRate,
-            "timestamp": ISO8601DateFormatter().string(from: Date()),
-            "hrvPerSecond": computedPerSecond, // full session HRV data per second
-            "ecg": ecgExport,
-            "robustHRVSummary": robustSummary as Any
-        ]
-
+        
         guard JSONSerialization.isValidJSONObject(exportData) else {
             print("Invalid JSON object.")
             return nil
@@ -424,7 +415,6 @@ class BluetoothManager: NSObject, ObservableObject {
         }
     }
 
-    /// Computes HRV (RMSSD, SDNN, meanHR) for every second using a sliding 20s window, starting after the first 20s of data.
     private func computeHRVPerSecondSlidingWindow() -> [[String: Any]] {
         let windowBeats = Int(hrvWindow * 2)
         guard windowBeats > 0, rrBuffer.count >= windowBeats else { return [] }
@@ -449,7 +439,6 @@ class BluetoothManager: NSObject, ObservableObject {
         return result
     }
 
-    /// Computes HRV (RMSSD, SDNN, meanHR) for every second of the available ECG data (using the last 20s for each second)
     private func computeHRVPerSecond() -> [[String: Any]] {
         // Use RR buffer if available
         guard rrBuffer.count > 0 else { return [] }
@@ -473,9 +462,7 @@ class BluetoothManager: NSObject, ObservableObject {
         }
         return result
     }
-    
-    // --- HRV over last 20s window ---
-    /// RR intervals (s) over the last 20s window, using Polar RR buffer if available
+
     var rrIntervals: [Double] {
         let windowBeats = Int(hrvWindow * 2)
         // Always return up to the last 20 RR intervals, even if fewer are available
@@ -485,23 +472,19 @@ class BluetoothManager: NSObject, ObservableObject {
         return []
     }
 
-    /// Computes RMSSD (ms) over the last 20 s using Polar RR intervals
     var hrvRMSSD: Double {
         // Show HRV even if fewer than 20 samples are available
         HRVCalculator.computeRMSSD(from: rrIntervals)
     }
 
-    /// Computes SDNN (ms) over the last 20 s using Polar RR intervals
     var hrvSDNN: Double {
         HRVCalculator.computeSDNN(from: rrIntervals)
     }
 
-    /// Computes mean heart rate (BPM) over the last 20 s using Polar RR intervals
     var meanHeartRate: Double {
         HRVCalculator.computeMeanHR(from: rrIntervals)
     }
 
-    /// Indices of detected peaks in the last 5s window, relative to ecgData
     private func processECGDataAsync() {
         // Only update HRV (RMSSD) over last 20s using polar RR buffer
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -600,12 +583,10 @@ class BluetoothManager: NSObject, ObservableObject {
             }
             return 
         }
-        
         // Only use last 1 minute for peak detection
         let now = accelerationData.last?.timestamp ?? 0
         let oneMinuteAgo = now - 60_000 // ms
         let recent = accelerationData.filter { $0.timestamp >= oneMinuteAgo }
-        
         guard recent.count > 5 else { 
             print("Too few acceleration samples for peak detection: \(recent.count)")
             return 
@@ -626,62 +607,47 @@ class BluetoothManager: NSObject, ObservableObject {
         
         // Lower threshold for higher sensitivity (1.0 instead of 1.5)
         let threshold = mean + 1.0 * std
-        
+        // Find peaks above threshold, min interval 0.3s (reduced from 0.5s)
         // Update current values for UI display
         if let lastZ = recent.last?.z {
             currentZAcceleration = lastZ
         }
         currentThreshold = threshold
-        
         print("Peak detection - mean: \(mean), std: \(std), threshold: \(threshold), samples: \(zVals.count)")
-
+        
         // Find peaks above threshold, min interval 0.3s (reduced from 0.5s)
         var newPeaks: [(timestamp: Double, value: Double)] = []
         let lastMinutePeaks = detectedPeaks.filter { $0.timestamp >= oneMinuteAgo }
         var lastPeak = lastMinutePeaks.last?.timestamp ?? 0
-        
         // Use absolute peak detection rather than only looking for positive peaks
         for i in 1..<(recent.count-1) {
-            let prev = recent[i-1].z
-            let curr = recent[i].z
-            let next = recent[i+1].z
-            let t = recent[i].timestamp
-            
+            let prev = recent[i-1]
+            let curr = recent[i]
+            let next = recent[i+1]
             // Detect both positive and negative peaks (abs difference from mean)
-            let absFromMean = abs(curr - mean)
-            
+            let absFromMean = abs(curr.z - mean)
             // Use absolute value criteria rather than just being above threshold
             if absFromMean > abs(threshold - mean) && 
-               abs(curr) > abs(prev) && abs(curr) > abs(next) && 
-               (t - lastPeak) > 300 { // 300ms minimum interval
-                
-                newPeaks.append((timestamp: t, value: curr))
-                lastPeak = t
-                print("Peak detected at \(t) with value \(curr), abs from mean: \(absFromMean)")
+               abs(curr.z) > abs(prev.z) && abs(curr.z) > abs(next.z) && 
+               (curr.timestamp - lastPeak) > 300 { // 300ms minimum interval
+                newPeaks.append((timestamp: curr.timestamp, value: curr.z))
+                lastPeak = curr.timestamp
+                print("Peak detected at \(curr.timestamp) with value \(curr.z), abs from mean: \(absFromMean)")
             }
         }
-        
         // Only keep last 1 minute of peaks, but ensure we have at least new peaks
         let combinedPeaks = lastMinutePeaks + newPeaks
         detectedPeaks = Array(combinedPeaks.suffix(max(20, newPeaks.count)))
-        
-        print("Total active peaks: \(detectedPeaks.count), new peaks: \(newPeaks.count)")
+        var intervals: [Double] = []
+        peakIntervals = intervals
         
         // Compute intervals
         let sortedTimestamps = detectedPeaks.map { $0.timestamp / 1000.0 }.sorted()
-        var intervals: [Double] = []
+        
         for i in 1..<sortedTimestamps.count {
             intervals.append(sortedTimestamps[i] - sortedTimestamps[i-1])
         }
         peakIntervals = intervals
-    }
-
-    // Helper struct for jump detection
-    struct AccSample {
-        let t: Double
-        let ax: Double
-        let ay: Double
-        let az: Double
     }
 
     // 1-pole high-pass filter for vertical acceleration
@@ -705,7 +671,6 @@ class BluetoothManager: NSObject, ObservableObject {
     // VERY simple and direct jump detection with proper bounds checking
     func detectJumps() {
         guard jumpMode else { return }
-        
         // Clear previous results each time
         jumpEvents = []
         jumpHeights = []
@@ -713,27 +678,22 @@ class BluetoothManager: NSObject, ObservableObject {
         // Look at the last 10 seconds of data
         let fs = accSamplingRate
         let rawSamples = accelerationData.suffix(Int(10.0 * fs))
-        
         guard rawSamples.count > 20 else {
             print("Not enough acceleration samples for jump detection")
             return
         }
         
+        // Get Z values
+        let zValues = rawSamples.map { $0.z }
         // Update current Z value
         if let lastSample = rawSamples.last {
             currentZAcceleration = lastSample.z
         }
         
-        print("Running jump detection on \(rawSamples.count) samples")
-        
-        // Get Z values
-        let zValues = rawSamples.map { $0.z }
-        
-        // ULTRA SIMPLE: Just look for any significant up/down movement
         let minZ = zValues.min() ?? 0
         let maxZ = zValues.max() ?? 0
         let range = maxZ - minZ
-        
+            
         print("Z range: \(range) (min: \(minZ), max: \(maxZ))")
         
         // Extremely sensitive threshold - just 0.2g difference required
@@ -751,25 +711,20 @@ class BluetoothManager: NSObject, ObservableObject {
             // Calculate a reasonable height based on time
             // Use a more forgiving formula to ensure we get some height
             let heightCm = 100.0 * 0.4 * 9.81 * pow(flightSeconds/2, 2) 
-            
-            // Apply very permissive limits
             let clampedHeight = min(max(heightCm, 5.0), 50.0)
             
             jumpEvents = [(takeoffIdx: takeoffIdx, landingIdx: landingIdx, heightCm: clampedHeight)]
             jumpHeights = [clampedHeight]
-            
             print("DETECTED JUMP! Height: \(clampedHeight)cm, Flight time: \(flightSeconds)s")
         } else {
             // Look for any peaks in Z acceleration as an alternative method
             var peaks = [(Int, Double)]()
             let mean = zValues.reduce(0, +) / Double(zValues.count)
-            
             // Find local maxima/minima that deviate significantly from the mean
             for i in 1..<(zValues.count-1) {
                 let prev = zValues[i-1]
                 let curr = zValues[i]
                 let next = zValues[i+1]
-                
                 // Look for both upward and downward peaks
                 if (curr > prev && curr > next && curr > mean + 0.1) ||
                    (curr < prev && curr < next && curr < mean - 0.1) {
@@ -782,7 +737,6 @@ class BluetoothManager: NSObject, ObservableObject {
             if peaks.count >= 2 {
                 // Sort by index
                 let sortedPeaks = peaks.sorted { $0.0 < $1.0 }
-                
                 // Take first and last peak
                 let first = sortedPeaks.first!
                 let last = sortedPeaks.last!
@@ -793,24 +747,23 @@ class BluetoothManager: NSObject, ObservableObject {
                 
                 // Conservative height calculation
                 let heightCm = min(max(100.0 * 0.3 * 9.81 * pow(flightSeconds/2, 2), 5.0), 40.0)
-                
                 jumpEvents = [(takeoffIdx: takeoffIdx, landingIdx: landingIdx, heightCm: heightCm)]
                 jumpHeights = [heightCm]
-                
                 print("DETECTED JUMP FROM PEAKS! Height: \(heightCm)cm, Flight time: \(flightSeconds)s")
             }
         }
-        
-        // Force UI update
         objectWillChange.send()
     }
 
     func startRobustHRVCalculation() {
         robustHRVCalculationTask?.cancel()
+        robustHRVCalculationTask = nil
         robustHRVReady = false
+        robustHRVProgress = 0.0
         robustHRVResult = nil
         // Removed robustHRVResultLocal
-
+        // Force UI update
+        objectWillChange.send()
         robustHRVCalculationTask = Task.detached { [weak self] in
             guard let self = self else { return }
             while true {
@@ -842,7 +795,6 @@ class BluetoothManager: NSObject, ObservableObject {
                         rrCount: rrPolar.count
                     )
                 }() : nil
-
                 await MainActor.run {
                     self.robustHRVResult = robustPolar
                     self.robustHRVReady = true
@@ -861,11 +813,18 @@ class BluetoothManager: NSObject, ObservableObject {
         robustHRVResult = nil
     }
 
+    // Add a session archive to store data after recording stops
+    private var archivedSessionData: [String: Any]? = nil
+    private var lastRecordingTime: Date? = nil
+    
     // MARK: - Recording Control
-
+    
     func startRecording() {
-        stopRecording() // Ensure previous session is closed
-
+        // Archive any previous session data before starting a new recording
+        if isRecording {
+            archiveCurrentSessionIfNeeded()
+        }
+        
         // Create (or replace) the session file
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let fileURL = documentsURL.appendingPathComponent("ecg_session_\(Date().timeIntervalSince1970).jsonl")
@@ -873,87 +832,143 @@ class BluetoothManager: NSObject, ObservableObject {
         sessionFileURL = fileURL
         sessionFileHandle = try? FileHandle(forWritingTo: fileURL)
         isRecording = true
+        lastRecordingTime = Date()
         print("Recording started: \(fileURL.path)")
     }
 
     func stopRecording() {
+        // Archive the session data before stopping
+        archiveCurrentSessionIfNeeded()
+        
         isRecording = false
         sessionFileHandle?.closeFile()
         sessionFileHandle = nil
         sessionFileURL = nil
-        // Clean up buffers to free memory
-        computedPerSecond.removeAll()
-        ecgData.removeAll()
-        robustECGBuffer.removeAll()
-        rrBuffer.removeAll()
+        
+        // Reset the streaming position counter
         lastStreamedSecond = 0
-        accelerationData.removeAll()
-        verticalSpeedData.removeAll()
-        print("Recording stopped")
+        
+        print("Recording stopped - data preserved for export")
+        
+        // Clean up old log files
+        cleanupOldLogFiles()
     }
-
-    // Lap control
-    func toggleLapActive() {
-        lapActive.toggle()
-        if (!lapActive) {
-            // Optionally, clear peaks/intervals when pausing
-            // detectedPeaks.removeAll()
-            // peakIntervals.removeAll()
+    
+    private func archiveCurrentSessionIfNeeded() {
+        guard sessionFileURL != nil else { return }
+        
+        // Save a snapshot of current session data
+        let ecgSnapshot = Array(ecgData.suffix(rawECGBufferSize))
+        let hrvSnapshot = Array(computedPerSecond)
+        
+        // Get robust HRV summary if available
+        var robustSummary: [String: Any]? = nil
+        if let robust = robustHRVResult {
+            robustSummary = [
+                "timestamp": ISO8601DateFormatter().string(from: Date()),
+                "windowSeconds": Int(robustWindow),
+                "rmssd": robust.rmssd,
+                "sdnn": robust.sdnn,
+                "meanHR": robust.meanHR,
+                "nn50": robust.nn50,
+                "pnn50": robust.pnn50,
+                "beats": robust.rrCount + 1
+            ]
         }
+        
+        // Read all computed values from the session file
+        var hrvPerSecond: [[String: Any]] = []
+        if let sessionURL = sessionFileURL,
+           let fileHandle = try? FileHandle(forReadingFrom: sessionURL) {
+            fileHandle.seek(toFileOffset: 0)
+            let content = fileHandle.readDataToEndOfFile()
+            if let string = String(data: content, encoding: .utf8) {
+                for line in string.split(separator: "\n") {
+                    if let data = line.data(using: .utf8),
+                       let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        hrvPerSecond.append(obj)
+                    }
+                }
+            }
+            fileHandle.closeFile()
+        }
+        
+        // Create archive data structure
+        archivedSessionData = [
+            "samplingRate": samplingRate,
+            "timestamp": ISO8601DateFormatter().string(from: lastRecordingTime ?? Date()),
+            "ecg": ecgSnapshot,
+            "hrvPerSecond": hrvSnapshot,
+            "fileHRVData": hrvPerSecond,
+            "robustHRVSummary": robustSummary as Any
+        ]
     }
 
-    // Export peaks and intervals as CSV
-    func exportPeaksToFile() -> URL? {
-        let header = "timestamp,value\n"
-        let peakLines = detectedPeaks.map { "\($0.timestamp),\($0.value)" }.joined(separator: "\n")
-        let intervalHeader = "\nintervals (s)\n"
-        let intervalLines = peakIntervals.map { String(format: "%.3f", $0) }.joined(separator: "\n")
-        let csv = header + peakLines + intervalHeader + intervalLines
+    // Accessor method for archived session data
+    func getArchivedSessionData() -> [String: Any]? {
+        return archivedSessionData
+    }
+    
+    // MARK: - File Management
+    
+    /// Clean up old log files, keeping only recent ones
+    private func cleanupOldLogFiles() {
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let fileManager = FileManager.default
+        
         do {
-            let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            let fileURL = documentsURL.appendingPathComponent("acc_peaks_\(Date().timeIntervalSince1970).csv")
-            try csv.write(to: fileURL, atomically: true, encoding: .utf8)
-            return fileURL
+            // Get all files in Documents
+            let files = try fileManager.contentsOfDirectory(at: documentsURL, includingPropertiesForKeys: [.creationDateKey], options: [])
+            
+            // Filter for our log file types
+            let sessionFiles = files.filter { $0.lastPathComponent.hasPrefix("ecg_session_") }
+            let exportFiles = files.filter { $0.lastPathComponent.hasPrefix("ecg_export_") }
+            let graphFiles = files.filter { $0.lastPathComponent.hasPrefix("ecg_graph_") }
+            
+            // Keep only the 5 most recent session files
+            cleanupOldFiles(sessionFiles, keepCount: 5)
+            // Keep only the 10 most recent export files
+            cleanupOldFiles(exportFiles, keepCount: 10)
+            // Keep only the 10 most recent graph files
+            cleanupOldFiles(graphFiles, keepCount: 10)
+            
         } catch {
-            print("Failed to write peaks export:", error)
-            return nil
+            print("Error cleaning up files: \(error)")
         }
+    }
+    
+    /// Delete old files, keeping only the most recent ones
+    private func cleanupOldFiles(_ files: [URL], keepCount: Int) {
+        guard files.count > keepCount else { return }
+        
+        // Sort by creation date, newest first
+        let sortedFiles = files.sorted { (file1, file2) -> Bool in
+            let date1 = try? file1.resourceValues(forKeys: [.creationDateKey]).creationDate ?? Date.distantPast
+            let date2 = try? file2.resourceValues(forKeys: [.creationDateKey]).creationDate ?? Date.distantPast
+            return date1! > date2!
+        }
+        
+        // Delete old files beyond our keep count
+        for file in sortedFiles.suffix(from: keepCount) {
+            try? FileManager.default.removeItem(at: file)
+            print("Removed old file: \(file.lastPathComponent)")
+        }
+    }
+    
+    // MARK: - Auto Cleanup
+    
+    /// Call this in AppDelegate's applicationWillTerminate or SceneDelegate's sceneDidDisconnect
+    func performAppTerminationCleanup() {
+        // Stop any ongoing recording
+        if isRecording {
+            stopRecording()
+        }
+        
+        // Clean up old log files
+        cleanupOldLogFiles()
     }
 
-    // Test function to generate artificial peaks for testing
-    func testPeakDetection() {
-        // Create artificial peaks at different heights
-        let now = Date().timeIntervalSince1970 * 1000 // current time in ms
-        var testPeaks: [(timestamp: Double, value: Double)] = []
-        
-        // Generate 5 test peaks
-        for i in 0..<5 {
-            let timestamp = now - Double(i * 1000) // 1 second apart
-            let value = 1.0 + Double(i) * 0.2 // Increasing height
-            testPeaks.append((timestamp: timestamp, value: value))
-        }
-        
-        // Add them to detected peaks
-        detectedPeaks = testPeaks + detectedPeaks
-        
-        // Calculate intervals
-        var testIntervals: [Double] = []
-        for _ in 1..<5 {
-            testIntervals.append(1.0) // 1 second intervals
-        }
-        
-        peakIntervals = testIntervals + peakIntervals
-        
-        print("Added 5 test peaks for visualization")
-    }
-
-    // Create an extremely obvious test pattern that will definitely appear
-    func testJumpDetection() {
-        print("Creating test jump for development")
-        jumpEvents = [(takeoffIdx: 10, landingIdx: 30, heightCm: 25.0)]
-        jumpHeights = [25.0]
-        objectWillChange.send()
-    }
+    // ... existing code ...
 }
 
 // MARK: - Polar SDK Observers

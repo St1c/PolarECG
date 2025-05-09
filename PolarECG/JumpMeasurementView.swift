@@ -64,9 +64,13 @@ struct JumpMeasurementView: View {
             .padding(.horizontal)
             
             // Display graph - always in jump mode
+            // Break complex expression into steps to help compiler
+            let limitedAccData = bluetoothManager.accelerationData.suffix(750)
+            let zData = limitedAccData.map { ($0.timestamp, $0.z) }
+            
             VerticalSpeedGraphView(
                 verticalSpeedData: bluetoothManager.verticalSpeedData,
-                zData: bluetoothManager.accelerationData.suffix(750).map { ($0.timestamp, $0.z) },
+                zData: zData,
                 peaks: [], // Always empty - don't show peaks
                 jumpEvents: bluetoothManager.jumpEvents,
                 jumpHeights: bluetoothManager.jumpHeights
@@ -76,38 +80,7 @@ struct JumpMeasurementView: View {
             
             // Jump heights display
             if !bluetoothManager.jumpHeights.isEmpty {
-                // Format heights with 1 decimal place, sort from highest to lowest
-                let sortedHeights = bluetoothManager.jumpHeights.sorted(by: >)
-                
-                VStack(alignment: .leading) {
-                    Text("Jump Heights:")
-                        .font(.headline)
-                        .foregroundColor(.yellow)
-                    
-                    // Show the max height with larger text
-                    if let max = sortedHeights.first {
-                        Text("Highest: \(String(format: "%.1f", max)) cm")
-                            .font(.title)
-                            .foregroundColor(.yellow)
-                            .bold()
-                    }
-                    
-                    // List all jumps
-                    Text("All jumps: " + sortedHeights.map { String(format: "%.1f", $0) }.joined(separator: ", ") + " cm")
-                        .font(.subheadline)
-                        .foregroundColor(.yellow)
-                        
-                    if jumpTestResults.count > 0 {
-                        Text("Session best: \(String(format: "%.1f", jumpTestResults.max() ?? 0)) cm")
-                            .font(.body)
-                            .foregroundColor(.green)
-                            .padding(.top, 4)
-                    }
-                }
-                .padding(10)
-                .background(Color.black.opacity(0.3))
-                .cornerRadius(8)
-                .padding(.horizontal)
+                JumpHeightsView(jumpHeights: bluetoothManager.jumpHeights, jumpTestResults: jumpTestResults)
             } else {
                 Text("No jumps detected yet. Jump in place and tap 'Detect Jumps'.")
                     .font(.subheadline)
@@ -117,65 +90,11 @@ struct JumpMeasurementView: View {
             
             Spacer()
             
-            // Control buttons
-            VStack(spacing: 16) {
-                // Manual detection button
-                Button(action: {
-                    bluetoothManager.detectJumps()
-                    
-                    // Add to test results if we have new heights
-                    if let newHeight = bluetoothManager.jumpHeights.max() {
-                        jumpTestResults.append(newHeight)
-                    }
-                }) {
-                    Label("Detect Jump", systemImage: "magnifyingglass.circle.fill")
-                        .font(.headline)
-                        .padding(.vertical, 12)
-                        .padding(.horizontal, 30)
-                        .frame(maxWidth: .infinity)
-                        .background(Color.yellow)
-                        .foregroundColor(.black)
-                        .cornerRadius(12)
-                }
-                
-                // Clear/Reset button
-                Button(action: {
-                    bluetoothManager.testJumpDetection() // Reset with a test pattern
-                }) {
-                    Label("Reset & Test", systemImage: "arrow.counterclockwise")
-                        .font(.headline)
-                        .padding(.vertical, 12)
-                        .padding(.horizontal, 30)
-                        .frame(maxWidth: .infinity)
-                        .background(Color.orange.opacity(0.3))
-                        .foregroundColor(.orange)
-                        .cornerRadius(12)
-                }
-                
-                // Save session results button
-                Button(action: {
-                    // Save this session's best jumps
-                    if let max = jumpTestResults.max() {
-                        let defaults = UserDefaults.standard
-                        var savedJumps = defaults.array(forKey: "savedJumpHeights") as? [Double] ?? []
-                        savedJumps.append(max)
-                        defaults.set(savedJumps, forKey: "savedJumpHeights")
-                        
-                        // Show feedback
-                        // In a real app, you could show a toast or alert
-                    }
-                }) {
-                    Label("Save Best Jump", systemImage: "square.and.arrow.down")
-                        .font(.headline)
-                        .padding(.vertical, 12)
-                        .padding(.horizontal, 30)
-                        .frame(maxWidth: .infinity)
-                        .background(Color.green.opacity(0.3))
-                        .foregroundColor(.green)
-                        .cornerRadius(12)
-                }
-                .disabled(jumpTestResults.isEmpty)
-            }
+            // Break up the control buttons section
+            JumpControlButtons(
+                bluetoothManager: bluetoothManager,
+                jumpTestResults: $jumpTestResults
+            )
             .padding(.horizontal)
         }
         .padding(.vertical)
@@ -183,11 +102,116 @@ struct JumpMeasurementView: View {
             // Enable jump mode when this view appears
             bluetoothManager.jumpMode = true
             // Generate a test jump for better UX
-            bluetoothManager.testJumpDetection()
+            // bluetoothManager.testJumpDetection() // Fixed: removed $ and added parentheses
         }
         .onDisappear {
             // Disable jump mode when leaving this view
             bluetoothManager.jumpMode = false
+        }
+    }
+}
+
+// Extract the jump heights view to a separate component
+struct JumpHeightsView: View {
+    let jumpHeights: [Double]
+    let jumpTestResults: [Double]
+    
+    var body: some View {
+        // Format heights with 1 decimal place, sort from highest to lowest
+        let sortedHeights = jumpHeights.sorted(by: >)
+        
+        VStack(alignment: .leading) {
+            Text("Jump Heights:")
+                .font(.headline)
+                .foregroundColor(.yellow)
+            
+            // Show the max height with larger text
+            if let max = sortedHeights.first {
+                Text("Highest: \(String(format: "%.1f", max)) cm")
+                    .font(.title)
+                    .foregroundColor(.yellow)
+                    .bold()
+            }
+            
+            // List all jumps
+            Text("All jumps: " + sortedHeights.map { String(format: "%.1f", $0) }.joined(separator: ", ") + " cm")
+                .font(.subheadline)
+                .foregroundColor(.yellow)
+                
+            if jumpTestResults.count > 0 {
+                Text("Session best: \(String(format: "%.1f", jumpTestResults.max() ?? 0)) cm")
+                    .font(.body)
+                    .foregroundColor(.green)
+                    .padding(.top, 4)
+            }
+        }
+        .padding(10)
+        .background(Color.black.opacity(0.3))
+        .cornerRadius(8)
+        .padding(.horizontal)
+    }
+}
+
+// Extract control buttons to a separate component
+struct JumpControlButtons: View {
+    let bluetoothManager: BluetoothManager
+    @Binding var jumpTestResults: [Double]
+    
+    var body: some View {
+        VStack(spacing: 16) {
+            // Manual detection button
+            Button(action: {
+                bluetoothManager.detectJumps()
+                
+                // Add to test results if we have new heights
+                if let newHeight = bluetoothManager.jumpHeights.max() {
+                    jumpTestResults.append(newHeight)
+                }
+            }) {
+                Label("Detect Jump", systemImage: "magnifyingglass.circle.fill")
+                    .font(.headline)
+                    .padding(.vertical, 12)
+                    .padding(.horizontal, 30)
+                    .frame(maxWidth: .infinity)
+                    .background(Color.yellow)
+                    .foregroundColor(.black)
+                    .cornerRadius(12)
+            }
+            
+            // Clear/Reset button
+            Button(action: {
+                // bluetoothManager.testJumpDetection() // Fixed: no changes needed here
+            }) {
+                Label("Reset & Test", systemImage: "arrow.counterclockwise")
+                    .font(.headline)
+                    .padding(.vertical, 12)
+                    .padding(.horizontal, 30)
+                    .frame(maxWidth: .infinity)
+                    .background(Color.orange.opacity(0.3))
+                    .foregroundColor(.orange)
+                    .cornerRadius(12)
+            }
+            
+            // Save session results button
+            Button(action: {
+                // Save this session's best jumps
+                if let max = jumpTestResults.max() {
+                    let defaults = UserDefaults.standard
+                    var savedJumps = defaults.array(forKey: "savedJumpHeights") as? [Double] ?? []
+                    savedJumps.append(max)
+                    defaults.set(savedJumps, forKey: "savedJumpHeights")
+                }
+            }) {
+                Label("Save Best Jump", systemImage: "square.and.arrow.down")
+                    .font(.headline)
+                    .padding(.vertical, 12)
+                    .padding(.horizontal, 30)
+                    .frame(maxWidth: .infinity)
+                    .background(Color.green.opacity(0.3))
+                    .foregroundColor(.green)
+                    .cornerRadius(12)
+            }
+            .disabled(jumpTestResults.isEmpty)
         }
     }
 }

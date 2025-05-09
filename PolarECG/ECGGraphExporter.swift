@@ -1,10 +1,12 @@
 import UIKit
 
 struct ECGGraphExporter {
+    // Updated to access archived session data if available
     static func exportECGGraph(
         data: [Double],
         samplingRate: Double,
-        peakIndices: [Int]?
+        peakIndices: [Int]?,
+        archivedSessionData: [String: Any]? = nil
     ) -> URL? {
         // Parameters
         let secondsToExport: Double = 60.0
@@ -17,11 +19,18 @@ struct ECGGraphExporter {
         let width = mmPerRow * pixelsPerMm
         let height = mmHeightPerRow * CGFloat(rows) * pixelsPerMm
 
-        // Prepare data
+        // Prepare data - use archived data if available
+        let ecgArray: [Double]
         let totalSamples = Int(samplingRate * secondsToExport)
-        let ecg = data.suffix(totalSamples)
-        guard ecg.count > 1 else { return nil }
-        let ecgArray = Array(ecg)
+        
+        if let archived = archivedSessionData, let archivedECG = archived["ecg"] as? [Double] {
+            ecgArray = Array(archivedECG.suffix(totalSamples))
+        } else {
+            let ecg = data.suffix(totalSamples)
+            ecgArray = Array(ecg)
+        }
+        
+        guard ecgArray.count > 1 else { return nil }
         let amplitudeScale: CGFloat = mmHeightPerRow * 1.8 // Further increased amplitude (was 1.0)
 
         // --- ECG annotation parameters ---
@@ -30,11 +39,14 @@ struct ECGGraphExporter {
         let textColor = UIColor.black
 
         // --- HRV/HR summary ---
-        // Try to load robust HRV summary from file if available (look for latest robust HRV export in Documents)
+        // Use provided archived data first, then fall back to file
         var robustSummary: [String: Any]? = nil
-        if let url = latestRobustHRVSummaryURL(),
-           let robustData = try? Data(contentsOf: url),
-           let obj = try? JSONSerialization.jsonObject(with: robustData) as? [String: Any] {
+        
+        if let archived = archivedSessionData, let summary = archived["robustHRVSummary"] as? [String: Any] {
+            robustSummary = summary
+        } else if let url = latestRobustHRVSummaryURL(),
+                  let robustData = try? Data(contentsOf: url),
+                  let obj = try? JSONSerialization.jsonObject(with: robustData) as? [String: Any] {
             robustSummary = obj
         }
 
@@ -195,11 +207,15 @@ struct ECGGraphExporter {
         let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(filename)
         do {
             try jpgData.write(to: url)
-            return url
         } catch {
             print("Failed to save ECG graph image:", error)
             return nil
         }
+
+        // After creating and saving the image, clean up old graph files
+        cleanupOldGraphFiles()
+        
+        return url
     }
 
     // Helper to get robust HRV summary file URL (if your app saves it somewhere)
@@ -220,5 +236,31 @@ struct ECGGraphExporter {
             return d1 > d2
         }
         return sorted.first
+    }
+
+    // Clean up old graph files
+    private static func cleanupOldGraphFiles() {
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let fileManager = FileManager.default
+        
+        do {
+            let files = try fileManager.contentsOfDirectory(at: documentsURL, includingPropertiesForKeys: [.creationDateKey], options: [])
+            let graphFiles = files.filter { $0.lastPathComponent.hasPrefix("ecg_graph_") }
+            
+            // Keep only 10 most recent graph files
+            if graphFiles.count > 10 {
+                let sortedFiles = graphFiles.sorted { (file1, file2) -> Bool in
+                    let date1 = try? file1.resourceValues(forKeys: [.creationDateKey]).creationDate ?? Date.distantPast
+                    let date2 = try? file2.resourceValues(forKeys: [.creationDateKey]).creationDate ?? Date.distantPast
+                    return date1! > date2!
+                }
+                
+                for file in sortedFiles.suffix(from: 10) {
+                    try? FileManager.default.removeItem(at: file)
+                }
+            }
+        } catch {
+            print("Error cleaning up graph files: \(error)")
+        }
     }
 }

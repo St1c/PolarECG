@@ -299,14 +299,14 @@ class BluetoothManager: NSObject, ObservableObject {
                         "meanHR": meanHR,
                         "source": "polar"
                     ])
+                    
+                    // Store current values in UserDefaults for sharing between views
+                    UserDefaults.standard.set(meanHR, forKey: "currentHR")
+                    UserDefaults.standard.set(rmssd, forKey: "currentHRV")
                 }
             }
         }
-        // Removed local RR HRV computation
-        // Limit memory usage
-        if computedPerSecond.count > computedPerSecondMaxCount {
-            computedPerSecond.removeFirst(computedPerSecond.count - computedPerSecondMaxCount)
-        }
+        // ...existing code...
     }
 
     // Compute and stream per-second HRV/HR values (append only new seconds)

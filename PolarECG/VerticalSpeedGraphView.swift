@@ -88,27 +88,32 @@ struct VerticalSpeedGraphView: View {
                 }
             }
 
-            // Draw jump events with revised indices handling
+            // Draw jump events - FIXED to avoid index out of range
             ForEach(jumpEvents.indices, id: \.self) { idx in
                 let event = jumpEvents[idx]
                 
-                // Scale the indices to our data array
-                let effectiveCount = points.count
-                let takeoffIndex = min(event.takeoffIdx, effectiveCount - 1)
-                let landingIndex = min(event.landingIdx, effectiveCount - 1)
+                // FIXED: Don't use original indices directly - use relative positions instead
+                // The jump events may have indices from the original full dataset,
+                // but we're showing only a window of that data
                 
-                // Better positioning 
-                let xTake = geo.size.width * CGFloat(takeoffIndex) / CGFloat(max(effectiveCount - 1, 1))
-                let xLand = geo.size.width * CGFloat(landingIndex) / CGFloat(max(effectiveCount - 1, 1))
+                // Calculate relative positions (0.0-1.0) in the graph
+                let relTakeoff = min(1.0, max(0.0, Double(event.takeoffIdx) / Double(max(1, windowLength))))
+                let relLanding = min(1.0, max(0.0, Double(event.landingIdx) / Double(max(1, windowLength))))
                 
-                // Use the same scaling as for the signal curve
-                let offset = baselineY
-                let scale = geo.size.height / 4
-                let takeValue = takeoffIndex < points.count ? points[takeoffIndex].z : 0
-                let landValue = landingIndex < points.count ? points[landingIndex].z : 0
+                // Convert to x positions in our display
+                let xTake = CGFloat(relTakeoff) * geo.size.width
+                let xLand = CGFloat(relLanding) * geo.size.width
                 
-                let yTake = offset - CGFloat(takeValue) * scale
-                let yLand = offset - CGFloat(landValue) * scale
+                // Calculate y positions safely
+                let takeoffIdx = Int(relTakeoff * Double(points.count - 1))
+                let landingIdx = Int(relLanding * Double(points.count - 1))
+                
+                // Safety check indices to avoid out of range errors
+                let takeValue = takeoffIdx >= 0 && takeoffIdx < points.count ? points[takeoffIdx].z : 0
+                let landValue = landingIdx >= 0 && landingIdx < points.count ? points[landingIdx].z : 0
+                
+                let yTake = baselineY - CGFloat(takeValue) * (geo.size.height / 4)
+                let yLand = baselineY - CGFloat(landValue) * (geo.size.height / 4)
                 
                 // Draw flight path curve
                 Path { path in

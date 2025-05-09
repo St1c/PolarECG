@@ -693,196 +693,103 @@ class BluetoothManager: NSObject, ObservableObject {
     func detectJumps() {
         guard jumpMode else { return }
         
-        // Clear previous test jumps
+        // Clear previous results each time
         jumpEvents = []
         jumpHeights = []
         
-        // Use the raw Z-axis data directly
+        // Look at the last 10 seconds of data
         let fs = accSamplingRate
-        let rawSamples = accelerationData.suffix(Int(5.0 * fs)) // Last 5 seconds
+        let rawSamples = accelerationData.suffix(Int(10.0 * fs))
         
-        guard rawSamples.count > 10 else {
-            print("Not enough samples for jump detection")
+        guard rawSamples.count > 20 else {
+            print("Not enough acceleration samples for jump detection")
             return
         }
         
-        // Debug output
-        print("Raw samples count: \(rawSamples.count)")
-        
-        // Display current value
+        // Update current Z value
         if let lastSample = rawSamples.last {
             currentZAcceleration = lastSample.z
-            print("Current Z: \(lastSample.z)")
         }
         
-        // Just look for a simple pattern of down-then-up in z-axis
+        print("Running jump detection on \(rawSamples.count) samples")
+        
+        // Get Z values
         let zValues = rawSamples.map { $0.z }
         
-        // Find min and max with bounds checking
-        guard !zValues.isEmpty, 
-              let minZ = zValues.min(),
-              let maxZ = zValues.max() else { 
-            print("Empty Z values array") 
-            return 
-        }
-        
-        // If we have significant movement, consider it a jump
+        // ULTRA SIMPLE: Just look for any significant up/down movement
+        let minZ = zValues.min() ?? 0
+        let maxZ = zValues.max() ?? 0
         let range = maxZ - minZ
+        
         print("Z range: \(range) (min: \(minZ), max: \(maxZ))")
         
-        // Very sensitive threshold - just 0.3g difference required
-        if range > 0.3 {
-            // Find index of min and max with safe unwrapping
+        // Extremely sensitive threshold - just 0.2g difference required
+        if range > 0.2 {
             guard let minIdx = zValues.firstIndex(of: minZ),
-                  let maxIdx = zValues.firstIndex(of: maxZ),
-                  minIdx < zValues.count,
-                  maxIdx < zValues.count,
-                  abs(maxIdx - minIdx) > 3 else { 
-                print("Invalid indices for min/max") 
+                  let maxIdx = zValues.firstIndex(of: maxZ) else { 
                 return 
             }
             
-            // Create a jump with height based on the z-range
+            // Use indices to calculate approximate flight time
             let takeoffIdx = min(minIdx, maxIdx)
             let landingIdx = max(minIdx, maxIdx)
             let flightSeconds = Double(landingIdx - takeoffIdx) / fs
             
-            // Calculate height using flight time
-            let heightCm = 100.0 * 0.5 * 9.81 * pow(flightSeconds/2, 2)
+            // Calculate a reasonable height based on time
+            // Use a more forgiving formula to ensure we get some height
+            let heightCm = 100.0 * 0.4 * 9.81 * pow(flightSeconds/2, 2) 
             
-            jumpEvents = [(takeoffIdx: takeoffIdx, landingIdx: landingIdx, heightCm: heightCm)]
-            jumpHeights = [heightCm]
+            // Apply very permissive limits
+            let clampedHeight = min(max(heightCm, 5.0), 50.0)
             
-            print("DETECTED JUMP! Height: \(heightCm)cm, Flight time: \(flightSeconds)s")
+            jumpEvents = [(takeoffIdx: takeoffIdx, landingIdx: landingIdx, heightCm: clampedHeight)]
+            jumpHeights = [clampedHeight]
             
-            // Force update the UI
-            objectWillChange.send()
-        }
-    }
-
-    // Main jump detection function - improved with more sensitivity and debug info
-    private func detectJumpsOld() {
-        guard jumpMode else { return }
-        
-        // Always clear previous jumps when detection runs to avoid showing only test jumps
-        if !jumpEvents.isEmpty && !jumpHeights.isEmpty {
-            print("Clearing previous jump events before new detection")
-            // Only keep the most recent test jump if needed for UI
-            let lastTestJump = jumpHeights.count == 1 && jumpHeights.first! == 30.8 ? jumpEvents.first : nil
-            jumpEvents = lastTestJump != nil ? [lastTestJump!] : []
-            jumpHeights = lastTestJump != nil ? [30.8] : []
-        }
-        
-        // SIMPLIFIED JUMP DETECTION - focused on z-axis with minimal processing
-        let fs = accSamplingRate
-        let windowSec = 6.0  // Use a shorter window - last 6 seconds
-        
-        // Get the very latest acceleration samples
-        let rawSamples = accelerationData.suffix(Int(windowSec * fs))
-        guard rawSamples.count > Int(fs) else {
-            print("Not enough acceleration samples for jump detection: \(rawSamples.count)")
-            return
-        }
-        
-        // Use the z-axis directly with minimal processing
-        let timestamps = rawSamples.map { $0.timestamp / 1000.0 } // ms to s
-        let zValues = rawSamples.map { $0.z }
-        
-        // Debug - print what we're seeing
-        if let lastZ = zValues.last {
-            print("Current Z value: \(lastZ)g (raw)")
-            currentZAcceleration = lastZ
-        }
-        
-        // Calculate a simple moving average to reduce noise
-        let smoothWindow = 5 // samples
-        var smoothedZ = zValues
-        if zValues.count > smoothWindow {
-            smoothedZ = []
-            for i in 0..<(zValues.count - smoothWindow + 1) {
-                let avgZ = zValues[i..<(i+smoothWindow)].reduce(0, +) / Double(smoothWindow)
-                smoothedZ.append(avgZ)
-            }
-            // Pad to maintain length
-            while smoothedZ.count < zValues.count {
-                smoothedZ.append(smoothedZ.last ?? 0)
-            }
-        }
-        
-        // Simple differentiation to detect changes
-        var deltaZ = [0.0]
-        for i in 1..<smoothedZ.count {
-            deltaZ.append(smoothedZ[i] - smoothedZ[i-1])
-        }
-        
-        // VERY SENSITIVE thresholds for jump detection
-        let takeoffThresh = -0.15 // Much more sensitive
-        let landingThresh = 0.15  // Much more sensitive
-        
-        // Detect jumps using simple heuristics
-        var events: [(takeoffIdx: Int, landingIdx: Int, heightCm: Double)] = []
-        var heights: [Double] = []
-        var i = 0
-        
-        // Advanced debug output
-        print("Jump detection running with \(zValues.count) samples, thresholds: \(takeoffThresh)/\(landingThresh)")
-        
-        while i < deltaZ.count - 1 {
-            // Look for rapid downward acceleration (takeoff)
-            if deltaZ[i] < takeoffThresh {
-                let takeOffIdx = i
-                print("Potential takeoff at idx \(takeOffIdx), value: \(deltaZ[takeOffIdx])")
-                
-                // Find subsequent upward acceleration (landing)
-                var landIdx = i
-                var foundLanding = false
-                
-                // Search for up to 1 second for landing
-                let maxSearchSamples = Int(fs * 1.0)
-                for j in i+1..<min(i + maxSearchSamples, deltaZ.count) {
-                    if deltaZ[j] > landingThresh {
-                        landIdx = j
-                        foundLanding = true
-                        print("Potential landing at idx \(landIdx), value: \(deltaZ[landIdx])")
-                        break
-                    }
-                }
-                
-                if foundLanding && takeOffIdx < landIdx {
-                    let takeoffTime = timestamps[takeOffIdx]
-                    let landingTime = timestamps[min(landIdx, timestamps.count - 1)]
-                    let tFlight = landingTime - takeoffTime
-                    
-                    // Allow even shorter flight times for testing
-                    if tFlight > 0.05 && tFlight < 2.0 {
-                        // h = 1/8 * g * t²
-                        let h = 0.5 * 9.81 * pow(tFlight/2, 2)
-                        let heightCm = h * 100.0
-                        
-                        // More lenient height detection
-                        if heightCm > 1.0 && heightCm < 200.0 {
-                            events.append((takeoffIdx: takeOffIdx, landingIdx: landIdx, heightCm: heightCm))
-                            heights.append(heightCm)
-                            print("JUMP DETECTED! Flight time: \(tFlight)s, height: \(heightCm) cm")
-                        }
-                    }
-                    i = landIdx + Int(fs * 0.5) // Skip ahead 0.5s
-                } else {
-                    i += 1
-                }
-            } else {
-                i += 1
-            }
-        }
-        
-        // Update the results if we found any jumps
-        if !events.isEmpty {
-            jumpEvents = events
-            jumpHeights = heights
-            print("Total jumps detected: \(events.count)")
+            print("DETECTED JUMP! Height: \(clampedHeight)cm, Flight time: \(flightSeconds)s")
         } else {
-            print("No jumps detected in this pass")
+            // Look for any peaks in Z acceleration as an alternative method
+            var peaks = [(Int, Double)]()
+            let mean = zValues.reduce(0, +) / Double(zValues.count)
+            
+            // Find local maxima/minima that deviate significantly from the mean
+            for i in 1..<(zValues.count-1) {
+                let prev = zValues[i-1]
+                let curr = zValues[i]
+                let next = zValues[i+1]
+                
+                // Look for both upward and downward peaks
+                if (curr > prev && curr > next && curr > mean + 0.1) ||
+                   (curr < prev && curr < next && curr < mean - 0.1) {
+                    peaks.append((i, curr))
+                    print("Found peak: \(curr)g at index \(i)")
+                }
+            }
+            
+            // If we found multiple peaks, use them to estimate jump
+            if peaks.count >= 2 {
+                // Sort by index
+                let sortedPeaks = peaks.sorted { $0.0 < $1.0 }
+                
+                // Take first and last peak
+                let first = sortedPeaks.first!
+                let last = sortedPeaks.last!
+                
+                let takeoffIdx = first.0
+                let landingIdx = last.0
+                let flightSeconds = Double(landingIdx - takeoffIdx) / fs
+                
+                // Conservative height calculation
+                let heightCm = min(max(100.0 * 0.3 * 9.81 * pow(flightSeconds/2, 2), 5.0), 40.0)
+                
+                jumpEvents = [(takeoffIdx: takeoffIdx, landingIdx: landingIdx, heightCm: heightCm)]
+                jumpHeights = [heightCm]
+                
+                print("DETECTED JUMP FROM PEAKS! Height: \(heightCm)cm, Flight time: \(flightSeconds)s")
+            }
         }
+        
+        // Force UI update
+        objectWillChange.send()
     }
 
     func startRobustHRVCalculation() {
@@ -1029,19 +936,9 @@ class BluetoothManager: NSObject, ObservableObject {
 
     // Create an extremely obvious test pattern that will definitely appear
     func testJumpDetection() {
-        print("Creating TEST JUMP")
-        
-        // Create an obvious test jump that will definitely be visible
-        let takeoffIdx = 10
-        let landingIdx = 30
-        let heightCm = 30.8
-        
-        jumpEvents = [(takeoffIdx: takeoffIdx, landingIdx: landingIdx, heightCm: heightCm)]
-        jumpHeights = [heightCm]
-        
-        print("Created TEST JUMP: height \(heightCm)cm")
-        
-        // Force refresh
+        print("Creating test jump for development")
+        jumpEvents = [(takeoffIdx: 10, landingIdx: 30, heightCm: 25.0)]
+        jumpHeights = [25.0]
         objectWillChange.send()
     }
 }

@@ -19,6 +19,7 @@ class BluetoothManager: NSObject, ObservableObject {
     private let disposeBag = DisposeBag()
     private var ecgStreamingStarted = false
     private var hrStreamingStarted = false // <-- Add this flag
+    private var scanDisposable: Disposable? = nil
 
     // MARK: - Published Data
     @Published var discoveredDevices: [PolarDeviceInfo] = []
@@ -29,6 +30,14 @@ class BluetoothManager: NSObject, ObservableObject {
     @Published var hrv: Double = 0.0
     @Published var accelerationData: [(timestamp: Double, x: Double, y: Double, z: Double)] = []
     @Published var verticalSpeedData: [(timestamp: Double, speed: Double)] = []
+    @Published var detectedPeaks: [(timestamp: Double, value: Double)] = []
+    @Published var peakIntervals: [Double] = []
+    @Published var lapActive: Bool = false
+    @Published var jumpEvents: [(takeoffIdx: Int, landingIdx: Int, heightCm: Double)] = []
+    @Published var jumpHeights: [Double] = []
+    @Published var jumpMode: Bool = false
+    @Published var currentZAcceleration: Double = 0.0
+    @Published var currentThreshold: Double = 0.0
 
     // MARK: - Buffer Settings
     let samplingRate = 130.0
@@ -85,6 +94,11 @@ class BluetoothManager: NSObject, ObservableObject {
 
     private var accStreamingStarted = false
     private let accSamplingRate = 50.0 // Polar H10 default for ACC
+
+    private let peakDetectionWindow: Double = 10.0 // seconds for dynamic threshold
+    private let minPeakInterval: Double = 1.0 // seconds between peaks
+
+    private var lastPeakTimestamp: Double = 0
 
     override init() {
         super.init()
@@ -158,20 +172,26 @@ class BluetoothManager: NSObject, ObservableObject {
     /// Starts BLE scan and collects found Polar devices
     func startScan() {
         discoveredDevices.removeAll()
-        api.searchForDevice()
+        // Dispose previous scan if running
+        scanDisposable?.dispose()
+        scanDisposable = api.searchForDevice()
             .subscribe(onNext: { [weak self] deviceInfo in
                 guard let self = self else { return }
-                if !self.discoveredDevices.contains(where: { $0.deviceId == deviceInfo.deviceId }) {
+                if (!self.discoveredDevices.contains(where: { $0.deviceId == deviceInfo.deviceId })) {
                     self.discoveredDevices.append(deviceInfo)
                 }
             }, onError: { error in
                 print("Scan error:", error)
-            }).disposed(by: disposeBag)
+            })
+        scanDisposable?.disposed(by: disposeBag)
     }
 
     /// Connects to the selected device
     func connect(to deviceId: String) {
         try? api.connectToDevice(deviceId)
+        // Stop scanning when a device is selected
+        scanDisposable?.dispose()
+        scanDisposable = nil
     }
 
     // MARK: - Data Streaming
@@ -534,14 +554,14 @@ class BluetoothManager: NSObject, ObservableObject {
     }
 
     private func appendAccSamples(_ samples: [(timestamp: Double, x: Double, y: Double, z: Double)]) {
-        // Append and keep only last 2 minutes of data
         accelerationData.append(contentsOf: samples)
         let maxCount = Int(accSamplingRate * 120.0)
         if accelerationData.count > maxCount {
             accelerationData.removeFirst(accelerationData.count - maxCount)
         }
-        // Compute vertical speed (z-axis derivative)
         computeVerticalSpeed()
+        detectPeaksIfActive()
+        if jumpMode { detectJumps() }
     }
 
     private func computeVerticalSpeed() {
@@ -556,6 +576,313 @@ class BluetoothManager: NSObject, ObservableObject {
             }
         }
         verticalSpeedData = speeds
+    }
+
+    private func detectPeaksIfActive() {
+        guard lapActive else { 
+            // Clear peaks when detection is inactive
+            if (!detectedPeaks.isEmpty) {
+                detectedPeaks = []
+                peakIntervals = []
+            }
+            return 
+        }
+        
+        // Only use last 1 minute for peak detection
+        let now = accelerationData.last?.timestamp ?? 0
+        let oneMinuteAgo = now - 60_000 // ms
+        let recent = accelerationData.filter { $0.timestamp >= oneMinuteAgo }
+        
+        guard recent.count > 5 else { 
+            print("Too few acceleration samples for peak detection: \(recent.count)")
+            return 
+        }
+        
+        // Dynamic threshold: mean + 1.0*stddev of last 10s (even more sensitive)
+        let windowMs = peakDetectionWindow * 1000
+        let windowArray: ArraySlice<(timestamp: Double, x: Double, y: Double, z: Double)>
+        if let firstIdx = recent.firstIndex(where: { $0.timestamp >= (now - windowMs) }) {
+            windowArray = recent[firstIdx...]
+        } else {
+            windowArray = recent[recent.startIndex...]
+        }
+        
+        let zVals: [Double] = Array(windowArray.map { $0.z })
+        let mean = zVals.reduce(0, +) / Double(zVals.count)
+        let std = sqrt(zVals.map { pow($0 - mean, 2) }.reduce(0, +) / Double(zVals.count))
+        
+        // Lower threshold for higher sensitivity (1.0 instead of 1.5)
+        let threshold = mean + 1.0 * std
+        
+        // Update current values for UI display
+        if let lastZ = recent.last?.z {
+            currentZAcceleration = lastZ
+        }
+        currentThreshold = threshold
+        
+        print("Peak detection - mean: \(mean), std: \(std), threshold: \(threshold), samples: \(zVals.count)")
+
+        // Find peaks above threshold, min interval 0.3s (reduced from 0.5s)
+        var newPeaks: [(timestamp: Double, value: Double)] = []
+        let lastMinutePeaks = detectedPeaks.filter { $0.timestamp >= oneMinuteAgo }
+        var lastPeak = lastMinutePeaks.last?.timestamp ?? 0
+        
+        // Use absolute peak detection rather than only looking for positive peaks
+        for i in 1..<(recent.count-1) {
+            let prev = recent[i-1].z
+            let curr = recent[i].z
+            let next = recent[i+1].z
+            let t = recent[i].timestamp
+            
+            // Detect both positive and negative peaks (abs difference from mean)
+            let absFromMean = abs(curr - mean)
+            
+            // Use absolute value criteria rather than just being above threshold
+            if absFromMean > abs(threshold - mean) && 
+               abs(curr) > abs(prev) && abs(curr) > abs(next) && 
+               (t - lastPeak) > 300 { // 300ms minimum interval
+                
+                newPeaks.append((timestamp: t, value: curr))
+                lastPeak = t
+                print("Peak detected at \(t) with value \(curr), abs from mean: \(absFromMean)")
+            }
+        }
+        
+        // Only keep last 1 minute of peaks, but ensure we have at least new peaks
+        let combinedPeaks = lastMinutePeaks + newPeaks
+        detectedPeaks = Array(combinedPeaks.suffix(max(20, newPeaks.count)))
+        
+        print("Total active peaks: \(detectedPeaks.count), new peaks: \(newPeaks.count)")
+        
+        // Compute intervals
+        let sortedTimestamps = detectedPeaks.map { $0.timestamp / 1000.0 }.sorted()
+        var intervals: [Double] = []
+        for i in 1..<sortedTimestamps.count {
+            intervals.append(sortedTimestamps[i] - sortedTimestamps[i-1])
+        }
+        peakIntervals = intervals
+    }
+
+    // Helper struct for jump detection
+    struct AccSample {
+        let t: Double
+        let ax: Double
+        let ay: Double
+        let az: Double
+    }
+
+    // 1-pole high-pass filter for vertical acceleration
+    private func highPass(_ signal: [Double], cutoffHz fc: Double, sampleRate fs: Double) -> [Double] {
+        let dt = 1.0 / fs
+        let RC = 1.0 / (2 * Double.pi * fc)
+        let alpha = RC / (RC + dt)
+        var out = Array(repeating: 0.0, count: signal.count)
+        var prevY = 0.0
+        var prevX = 0.0
+        for i in 0..<signal.count {
+            let x = signal[i]
+            let y = alpha * (prevY + x - prevX)
+            out[i] = y
+            prevY = y
+            prevX = x
+        }
+        return out
+    }
+
+    // VERY simple and direct jump detection with proper bounds checking
+    func detectJumps() {
+        guard jumpMode else { return }
+        
+        // Clear previous test jumps
+        jumpEvents = []
+        jumpHeights = []
+        
+        // Use the raw Z-axis data directly
+        let fs = accSamplingRate
+        let rawSamples = accelerationData.suffix(Int(5.0 * fs)) // Last 5 seconds
+        
+        guard rawSamples.count > 10 else {
+            print("Not enough samples for jump detection")
+            return
+        }
+        
+        // Debug output
+        print("Raw samples count: \(rawSamples.count)")
+        
+        // Display current value
+        if let lastSample = rawSamples.last {
+            currentZAcceleration = lastSample.z
+            print("Current Z: \(lastSample.z)")
+        }
+        
+        // Just look for a simple pattern of down-then-up in z-axis
+        let zValues = rawSamples.map { $0.z }
+        
+        // Find min and max with bounds checking
+        guard !zValues.isEmpty, 
+              let minZ = zValues.min(),
+              let maxZ = zValues.max() else { 
+            print("Empty Z values array") 
+            return 
+        }
+        
+        // If we have significant movement, consider it a jump
+        let range = maxZ - minZ
+        print("Z range: \(range) (min: \(minZ), max: \(maxZ))")
+        
+        // Very sensitive threshold - just 0.3g difference required
+        if range > 0.3 {
+            // Find index of min and max with safe unwrapping
+            guard let minIdx = zValues.firstIndex(of: minZ),
+                  let maxIdx = zValues.firstIndex(of: maxZ),
+                  minIdx < zValues.count,
+                  maxIdx < zValues.count,
+                  abs(maxIdx - minIdx) > 3 else { 
+                print("Invalid indices for min/max") 
+                return 
+            }
+            
+            // Create a jump with height based on the z-range
+            let takeoffIdx = min(minIdx, maxIdx)
+            let landingIdx = max(minIdx, maxIdx)
+            let flightSeconds = Double(landingIdx - takeoffIdx) / fs
+            
+            // Calculate height using flight time
+            let heightCm = 100.0 * 0.5 * 9.81 * pow(flightSeconds/2, 2)
+            
+            jumpEvents = [(takeoffIdx: takeoffIdx, landingIdx: landingIdx, heightCm: heightCm)]
+            jumpHeights = [heightCm]
+            
+            print("DETECTED JUMP! Height: \(heightCm)cm, Flight time: \(flightSeconds)s")
+            
+            // Force update the UI
+            objectWillChange.send()
+        }
+    }
+
+    // Main jump detection function - improved with more sensitivity and debug info
+    private func detectJumpsOld() {
+        guard jumpMode else { return }
+        
+        // Always clear previous jumps when detection runs to avoid showing only test jumps
+        if !jumpEvents.isEmpty && !jumpHeights.isEmpty {
+            print("Clearing previous jump events before new detection")
+            // Only keep the most recent test jump if needed for UI
+            let lastTestJump = jumpHeights.count == 1 && jumpHeights.first! == 30.8 ? jumpEvents.first : nil
+            jumpEvents = lastTestJump != nil ? [lastTestJump!] : []
+            jumpHeights = lastTestJump != nil ? [30.8] : []
+        }
+        
+        // SIMPLIFIED JUMP DETECTION - focused on z-axis with minimal processing
+        let fs = accSamplingRate
+        let windowSec = 6.0  // Use a shorter window - last 6 seconds
+        
+        // Get the very latest acceleration samples
+        let rawSamples = accelerationData.suffix(Int(windowSec * fs))
+        guard rawSamples.count > Int(fs) else {
+            print("Not enough acceleration samples for jump detection: \(rawSamples.count)")
+            return
+        }
+        
+        // Use the z-axis directly with minimal processing
+        let timestamps = rawSamples.map { $0.timestamp / 1000.0 } // ms to s
+        let zValues = rawSamples.map { $0.z }
+        
+        // Debug - print what we're seeing
+        if let lastZ = zValues.last {
+            print("Current Z value: \(lastZ)g (raw)")
+            currentZAcceleration = lastZ
+        }
+        
+        // Calculate a simple moving average to reduce noise
+        let smoothWindow = 5 // samples
+        var smoothedZ = zValues
+        if zValues.count > smoothWindow {
+            smoothedZ = []
+            for i in 0..<(zValues.count - smoothWindow + 1) {
+                let avgZ = zValues[i..<(i+smoothWindow)].reduce(0, +) / Double(smoothWindow)
+                smoothedZ.append(avgZ)
+            }
+            // Pad to maintain length
+            while smoothedZ.count < zValues.count {
+                smoothedZ.append(smoothedZ.last ?? 0)
+            }
+        }
+        
+        // Simple differentiation to detect changes
+        var deltaZ = [0.0]
+        for i in 1..<smoothedZ.count {
+            deltaZ.append(smoothedZ[i] - smoothedZ[i-1])
+        }
+        
+        // VERY SENSITIVE thresholds for jump detection
+        let takeoffThresh = -0.15 // Much more sensitive
+        let landingThresh = 0.15  // Much more sensitive
+        
+        // Detect jumps using simple heuristics
+        var events: [(takeoffIdx: Int, landingIdx: Int, heightCm: Double)] = []
+        var heights: [Double] = []
+        var i = 0
+        
+        // Advanced debug output
+        print("Jump detection running with \(zValues.count) samples, thresholds: \(takeoffThresh)/\(landingThresh)")
+        
+        while i < deltaZ.count - 1 {
+            // Look for rapid downward acceleration (takeoff)
+            if deltaZ[i] < takeoffThresh {
+                let takeOffIdx = i
+                print("Potential takeoff at idx \(takeOffIdx), value: \(deltaZ[takeOffIdx])")
+                
+                // Find subsequent upward acceleration (landing)
+                var landIdx = i
+                var foundLanding = false
+                
+                // Search for up to 1 second for landing
+                let maxSearchSamples = Int(fs * 1.0)
+                for j in i+1..<min(i + maxSearchSamples, deltaZ.count) {
+                    if deltaZ[j] > landingThresh {
+                        landIdx = j
+                        foundLanding = true
+                        print("Potential landing at idx \(landIdx), value: \(deltaZ[landIdx])")
+                        break
+                    }
+                }
+                
+                if foundLanding && takeOffIdx < landIdx {
+                    let takeoffTime = timestamps[takeOffIdx]
+                    let landingTime = timestamps[min(landIdx, timestamps.count - 1)]
+                    let tFlight = landingTime - takeoffTime
+                    
+                    // Allow even shorter flight times for testing
+                    if tFlight > 0.05 && tFlight < 2.0 {
+                        // h = 1/8 * g * t²
+                        let h = 0.5 * 9.81 * pow(tFlight/2, 2)
+                        let heightCm = h * 100.0
+                        
+                        // More lenient height detection
+                        if heightCm > 1.0 && heightCm < 200.0 {
+                            events.append((takeoffIdx: takeOffIdx, landingIdx: landIdx, heightCm: heightCm))
+                            heights.append(heightCm)
+                            print("JUMP DETECTED! Flight time: \(tFlight)s, height: \(heightCm) cm")
+                        }
+                    }
+                    i = landIdx + Int(fs * 0.5) // Skip ahead 0.5s
+                } else {
+                    i += 1
+                }
+            } else {
+                i += 1
+            }
+        }
+        
+        // Update the results if we found any jumps
+        if !events.isEmpty {
+            jumpEvents = events
+            jumpHeights = heights
+            print("Total jumps detected: \(events.count)")
+        } else {
+            print("No jumps detected in this pass")
+        }
     }
 
     func startRobustHRVCalculation() {
@@ -643,6 +970,79 @@ class BluetoothManager: NSObject, ObservableObject {
         accelerationData.removeAll()
         verticalSpeedData.removeAll()
         print("Recording stopped")
+    }
+
+    // Lap control
+    func toggleLapActive() {
+        lapActive.toggle()
+        if (!lapActive) {
+            // Optionally, clear peaks/intervals when pausing
+            // detectedPeaks.removeAll()
+            // peakIntervals.removeAll()
+        }
+    }
+
+    // Export peaks and intervals as CSV
+    func exportPeaksToFile() -> URL? {
+        let header = "timestamp,value\n"
+        let peakLines = detectedPeaks.map { "\($0.timestamp),\($0.value)" }.joined(separator: "\n")
+        let intervalHeader = "\nintervals (s)\n"
+        let intervalLines = peakIntervals.map { String(format: "%.3f", $0) }.joined(separator: "\n")
+        let csv = header + peakLines + intervalHeader + intervalLines
+        do {
+            let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+            let fileURL = documentsURL.appendingPathComponent("acc_peaks_\(Date().timeIntervalSince1970).csv")
+            try csv.write(to: fileURL, atomically: true, encoding: .utf8)
+            return fileURL
+        } catch {
+            print("Failed to write peaks export:", error)
+            return nil
+        }
+    }
+
+    // Test function to generate artificial peaks for testing
+    func testPeakDetection() {
+        // Create artificial peaks at different heights
+        let now = Date().timeIntervalSince1970 * 1000 // current time in ms
+        var testPeaks: [(timestamp: Double, value: Double)] = []
+        
+        // Generate 5 test peaks
+        for i in 0..<5 {
+            let timestamp = now - Double(i * 1000) // 1 second apart
+            let value = 1.0 + Double(i) * 0.2 // Increasing height
+            testPeaks.append((timestamp: timestamp, value: value))
+        }
+        
+        // Add them to detected peaks
+        detectedPeaks = testPeaks + detectedPeaks
+        
+        // Calculate intervals
+        var testIntervals: [Double] = []
+        for _ in 1..<5 {
+            testIntervals.append(1.0) // 1 second intervals
+        }
+        
+        peakIntervals = testIntervals + peakIntervals
+        
+        print("Added 5 test peaks for visualization")
+    }
+
+    // Create an extremely obvious test pattern that will definitely appear
+    func testJumpDetection() {
+        print("Creating TEST JUMP")
+        
+        // Create an obvious test jump that will definitely be visible
+        let takeoffIdx = 10
+        let landingIdx = 30
+        let heightCm = 30.8
+        
+        jumpEvents = [(takeoffIdx: takeoffIdx, landingIdx: landingIdx, heightCm: heightCm)]
+        jumpHeights = [heightCm]
+        
+        print("Created TEST JUMP: height \(heightCm)cm")
+        
+        // Force refresh
+        objectWillChange.send()
     }
 }
 

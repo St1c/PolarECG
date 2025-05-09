@@ -1,12 +1,19 @@
 import SwiftUI
 import UIKit
 
+// Break down the complex property expressions into simpler components
 struct ContentView: View {
+    // StateObject for the bluetooth manager
     @StateObject private var bluetoothManager = BluetoothManager()
+    
+    // Simple boolean states 
     @State private var isSharing = false
-    @State private var shareFileURL: URL?
     @State private var canExport: Bool = false
     @State private var showAccGraph = false
+    @State private var showJumpMode = false
+    
+    // URL state - separating this from the complex expression
+    @State private var shareFileURL: URL? = nil
     
     var body: some View {
         NavigationView {
@@ -67,17 +74,165 @@ struct ContentView: View {
                             .padding(.top, 4)
 
                             if showAccGraph {
-                                VerticalSpeedGraphView(verticalSpeedData: bluetoothManager.verticalSpeedData)
-                                    .frame(height: 120)
+                                VStack(spacing: 8) {
+                                    HStack {
+                                        Spacer()
+                                        
+                                        // Jump test mode toggle - only control we need
+                                        Toggle(isOn: $showJumpMode) {
+                                            Text("Jump Height Test")
+                                                .foregroundColor(.yellow)
+                                                .font(.headline)
+                                        }
+                                        .onChange(of: showJumpMode) { newValue in
+                                            bluetoothManager.jumpMode = newValue
+                                            if newValue {
+                                                // Auto-test when turning on
+                                                bluetoothManager.testJumpDetection()
+                                            }
+                                        }
+                                        .toggleStyle(SwitchToggleStyle(tint: .yellow))
+                                    }
+                                    .padding(.horizontal, 8)
+                                    
+                                    // Jump mode info and test button
+                                    if showJumpMode {
+                                        Text("JUMP MODE: Stand still, then jump vertically")
+                                            .font(.headline)
+                                            .foregroundColor(.yellow)
+                                            .padding(.horizontal, 8)
+                                            
+                                        // Jump test button
+                                        Button(action: {
+                                            bluetoothManager.testJumpDetection()
+                                        }) {
+                                            Label("Test + Detect Jumps", systemImage: "arrow.up.circle")
+                                                .foregroundColor(.yellow)
+                                                .font(.headline)
+                                                .padding(.vertical, 8)
+                                                .padding(.horizontal, 16)
+                                                .background(Color.yellow.opacity(0.2))
+                                                .cornerRadius(8)
+                                        }
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        
+                                        // Add real-time z-acceleration display
+                                        Text("Z Acceleration: \(bluetoothManager.currentZAcceleration, specifier: "%.3f")g")
+                                            .font(.subheadline)
+                                            .foregroundColor(.yellow)
+                                            .padding(.horizontal, 8)
+                                    }
+                                    
+                                    // Inside the conditional block for when showJumpMode is true
+                                    if showJumpMode {
+                                        // Show jump mode instructions and debug information
+                                        VStack(alignment: .leading) {
+                                            Text("JUMP MODE: Perform a vertical jump with H10 sensor")
+                                                .font(.headline)
+                                                .foregroundColor(.yellow)
+
+                                            // Add more debug info
+                                            Text("Current Z: \(bluetoothManager.currentZAcceleration, specifier: "%.3f")g")
+                                                .font(.subheadline)
+                                                .foregroundColor(.yellow)
+                                                
+                                            HStack {
+                                                // Make test button more prominent
+                                                Button(action: {
+                                                    print("Manually triggering test jump...")
+                                                    bluetoothManager.testJumpDetection()
+                                                }) {
+                                                    Label("CREATE TEST JUMP", systemImage: "waveform.path.ecg")
+                                                        .foregroundColor(.black)
+                                                        .font(.headline.bold())
+                                                        .padding(.vertical, 10)
+                                                        .padding(.horizontal, 16)
+                                                        .background(Color.yellow)
+                                                        .cornerRadius(8)
+                                                }
+                                                
+                                                // Add a detection button
+                                                Button(action: {
+                                                    print("Manual detection...")
+                                                    bluetoothManager.detectJumps()
+                                                }) {
+                                                    Label("Detect Now", systemImage: "magnifyingglass")
+                                                        .foregroundColor(.yellow)
+                                                        .padding(.vertical, 10)
+                                                        .padding(.horizontal, 16)
+                                                        .background(Color.black.opacity(0.3))
+                                                        .cornerRadius(8)
+                                                }
+                                            }
+                                        }
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                    }
+
+                                    // Display graph - always pass empty array for peaks to hide them
+                                    // Only show the last 15s of data for jump mode (750 samples at 50Hz) 
+                                    VerticalSpeedGraphView(
+                                        verticalSpeedData: bluetoothManager.verticalSpeedData,
+                                        zData: showJumpMode ? 
+                                            bluetoothManager.accelerationData.suffix(750).map { ($0.timestamp, $0.z) } :
+                                            bluetoothManager.accelerationData.suffix(3000).map { ($0.timestamp, $0.z) },
+                                        peaks: [], // Always empty - don't show peaks
+                                        jumpEvents: showJumpMode ? bluetoothManager.jumpEvents : [],
+                                        jumpHeights: showJumpMode ? bluetoothManager.jumpHeights : []
+                                    )
+                                    .frame(height: 180)
                                     .padding(.horizontal)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 12)
-                                            .fill(Color.white.opacity(0.03))
-                                    )
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 12)
-                                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                                    )
+                                    
+                                    // Jump heights display - the only info we need now
+                                    if showJumpMode && !bluetoothManager.jumpHeights.isEmpty {
+                                        // Format heights with 1 decimal place, sort from highest to lowest
+                                        let sortedHeights = bluetoothManager.jumpHeights.sorted(by: >)
+                                        
+                                        VStack(alignment: .leading) {
+                                            Text("Jump Heights:")
+                                                .font(.headline)
+                                                .foregroundColor(.yellow)
+                                            
+                                            // Show the max height with larger text
+                                            if let max = sortedHeights.first {
+                                                Text("Highest: \(String(format: "%.1f", max)) cm")
+                                                    .font(.title)
+                                                    .foregroundColor(.yellow)
+                                                    .bold()
+                                            }
+                                            
+                                            // List all jumps
+                                            Text("All jumps: " + sortedHeights.map { String(format: "%.1f", $0) }.joined(separator: ", ") + " cm")
+                                                .font(.subheadline)
+                                                .foregroundColor(.yellow)
+                                        }
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 5)
+                                        .background(Color.black.opacity(0.3))
+                                        .cornerRadius(8)
+                                        .padding(.horizontal, 8)
+                                    } else if showJumpMode {
+                                        Text("No jumps detected yet. Try the 'Generate Test Jump' button or perform a real jump.")
+                                            .font(.subheadline)
+                                            .foregroundColor(.yellow)
+                                            .padding(.horizontal, 8)
+                                    }
+                                    
+                                    // Add a button to manually trigger jump detection
+                                    Button(action: {
+                                        print("Manual jump detection triggered")
+                                        bluetoothManager.detectJumps() // Directly call jump detection
+                                    }) {
+                                        Text("Detect Jumps Now")
+                                            .foregroundColor(.yellow)
+                                            .padding(.vertical, 4)
+                                            .padding(.horizontal, 8)
+                                            .background(Color.yellow.opacity(0.2))
+                                            .cornerRadius(5)
+                                    }
+                                    .padding(.horizontal, 8)
+                                }
                             }
 
                             // Robust HRV calculation info
